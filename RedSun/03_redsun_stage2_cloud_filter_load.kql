@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone RedSun Stage 2 hunt from 01_redsun_full_attack_chain.kql.
+//   Finds cldapi.dll loaded by a process running from a temporary path.
+
+let Lookback = 2h;
+let IsTempPath = (Path:string) {
+    tolower(Path) contains @"\appdata\local\temp\"
+    or tolower(Path) contains @"\windows\temp\"
+    or tolower(Path) startswith @"c:\temp\"
+    or tolower(Path) contains @"\temp\"
+};
+let NormalizePath = (FolderPath:string, FileName:string) {
+    iff(
+        isnotempty(FileName) and tolower(FolderPath) endswith strcat(@"\", tolower(FileName)),
+        FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceImageLoadEvents
+| where Timestamp >= ago(Lookback)
+| where FileName =~ "cldapi.dll"
+| where IsTempPath(InitiatingProcessFolderPath) or IsTempPath(InitiatingProcessCommandLine)
+| where InitiatingProcessFileName !in~ (
+    "OneDrive.exe",
+    "OneDriveSetup.exe",
+    "Dropbox.exe",
+    "DropboxUpdate.exe",
+    "Box.exe",
+    "BoxDrive.exe",
+    "GoogleDriveFS.exe",
+    "GoogleDriveSync.exe",
+    "FileCoAuth.exe"
+)
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage2_CloudFilterLoad",
+    StageDescription = "cldapi.dll loaded by a process running from a temporary path",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = NormalizePath(FolderPath, FileName),
+    AdditionalContext = strcat("LoadedImage=", NormalizePath(FolderPath, FileName))
+| order by Timestamp desc

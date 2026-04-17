@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone RedSun Stage 5 hunt from 01_redsun_full_attack_chain.kql.
+//   Finds conhost.exe spawned as SYSTEM from a non-standard parent.
+
+let Lookback = 2h;
+let NormalizePath = (FolderPath:string, FileName:string) {
+    iff(
+        isnotempty(FileName) and tolower(FolderPath) endswith strcat(@"\", tolower(FileName)),
+        FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceProcessEvents
+| where Timestamp >= ago(Lookback)
+| where FileName =~ "conhost.exe"
+| where AccountSid == "S-1-5-18" or AccountName =~ "SYSTEM"
+| where InitiatingProcessFileName !in~ ("csrss.exe", "wininit.exe", "svchost.exe", "services.exe")
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage5_SystemConhostSpawn",
+    StageDescription = "conhost.exe spawned as SYSTEM from a non-standard parent",
+    ProcessName = FileName,
+    ProcessPath = NormalizePath(FolderPath, FileName),
+    ProcessCommandLine,
+    AccountName,
+    AccountSid,
+    Evidence = ProcessCommandLine,
+    AdditionalContext = strcat("Parent=", InitiatingProcessFileName, "; ParentCommandLine=", InitiatingProcessCommandLine)
+| order by Timestamp desc

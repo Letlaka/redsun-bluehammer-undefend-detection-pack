@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone RedSun Stage 4 hunt from 01_redsun_full_attack_chain.kql.
+//   Finds TieringEngineService.exe written in C:\Windows\System32.
+
+let Lookback = 2h;
+let TargetFileName = "TieringEngineService.exe";
+let TargetFileNameLower = tolower(TargetFileName);
+let TargetSystem32Path = strcat(@"c:\windows\system32\", TargetFileNameLower);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    iff(
+        isnotempty(FileName) and tolower(FolderPath) endswith strcat(@"\", tolower(FileName)),
+        FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceFileEvents
+| where Timestamp >= ago(Lookback)
+| where ActionType in~ ("FileCreated", "FileModified", "FileRenamed")
+| where FileName =~ TargetFileName
+| extend
+    FilePath = NormalizePath(FolderPath, FileName),
+    FilePathLower = tolower(NormalizePath(FolderPath, FileName)),
+    FolderPathLower = tolower(FolderPath)
+| where FilePathLower == TargetSystem32Path
+    or (FolderPathLower == @"c:\windows\system32" and FileName =~ TargetFileName)
+| extend WriterClass = case(
+    InitiatingProcessFileName in~ ("MsMpEng.exe", "MpCmdRun.exe", "NisSrv.exe"), "DefenderWriter",
+    InitiatingProcessAccountSid == "S-1-5-18" or InitiatingProcessAccountName =~ "SYSTEM", "SystemWriter",
+    "NonSystemWriter"
+)
+| where WriterClass in ("DefenderWriter", "NonSystemWriter")
+    or InitiatingProcessFileName !in~ (
+        "TrustedInstaller.exe",
+        "wusa.exe",
+        "msiexec.exe",
+        "svchost.exe",
+        "tiworker.exe",
+        "dism.exe"
+    )
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage4_System32TieringWrite",
+    StageDescription = "TieringEngineService.exe written in System32 by Defender or an unusual writer",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = FilePath,
+    AdditionalContext = strcat("WriterClass=", WriterClass, "; ActionType=", ActionType, "; Path=", FilePath)
+| order by Timestamp desc

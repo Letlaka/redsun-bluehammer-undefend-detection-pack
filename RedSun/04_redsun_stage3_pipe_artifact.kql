@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone RedSun Stage 3 hunt from 01_redsun_full_attack_chain.kql.
+//   Finds REDSUN named-pipe or pipe-name artifacts in DeviceEvents.
+
+let Lookback = 2h;
+let NormalizePath = (FolderPath:string, FileName:string) {
+    iff(
+        isnotempty(FileName) and tolower(FolderPath) endswith strcat(@"\", tolower(FileName)),
+        FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceEvents
+| where Timestamp >= ago(Lookback)
+| extend AdditionalFieldsText = tostring(AdditionalFields)
+| where AdditionalFieldsText has "REDSUN"
+| where ActionType has "NamedPipe"
+    or AdditionalFieldsText contains @"\pipe\"
+    or AdditionalFieldsText has "PipeName"
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage3_RedsunPipeArtifact",
+    StageDescription = "REDSUN named-pipe or pipe-name artifact observed",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = AdditionalFieldsText,
+    AdditionalContext = AdditionalFieldsText
+| order by Timestamp desc

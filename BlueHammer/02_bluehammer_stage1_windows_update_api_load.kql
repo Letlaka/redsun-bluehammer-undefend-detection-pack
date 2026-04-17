@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 1 hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds Windows Update API DLLs loaded by a non-standard process.
+
+let Lookback = 2h;
+let TrustedWUProcesses = dynamic([
+    "wuauclt.exe", "MsMpEng.exe", "svchost.exe", "TiWorker.exe",
+    "UsoClient.exe", "WaaSMedicAgent.exe", "MusNotification.exe", "wusa.exe"
+]);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceImageLoadEvents
+| where Timestamp >= ago(Lookback)
+| where FileName in~ ("wuapi.dll", "wuaueng.dll")
+| extend InitiatingPathLower = tolower(InitiatingProcessFolderPath)
+| where not(
+    InitiatingPathLower startswith @"c:\windows\system32\"
+    or InitiatingPathLower startswith @"c:\windows\syswow64\"
+    or InitiatingPathLower startswith @"c:\windows\winsxs\"
+)
+| where InitiatingProcessFileName !in~ (TrustedWUProcesses)
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage1_WindowsUpdateComApiLoad",
+    StageDescription = "Windows Update API DLL loaded by a non-standard process outside Windows system paths",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = NormalizePath(FolderPath, FileName),
+    AdditionalContext = strcat("LoadedLibrary=", FileName, " | LibraryPath=", FolderPath)
+| order by Timestamp desc

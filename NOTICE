@@ -1,0 +1,13 @@
+# Defender XDR Advanced Hunting Detection Library
+
+Copyright 2026 Letlaka
+
+This repository contains AI-generated Microsoft Defender XDR Advanced Hunting
+scripts and supporting documentation.
+
+The scripts are provided for defensive security research, detection engineering,
+lab validation, and controlled hunting workflows. They are not guaranteed to be
+correct, safe, complete, current, or suitable for production use.
+
+Every script must be reviewed, tested, tuned, and verified before deployment to
+any live production environment.

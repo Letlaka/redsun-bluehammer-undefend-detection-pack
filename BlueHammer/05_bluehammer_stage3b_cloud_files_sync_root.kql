@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 3b hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds Cloud Files sync-root registration by non-standard processes.
+
+let Lookback = 2h;
+let TrustedSyncProviders = dynamic([
+    "OneDrive.exe", "GoogleDriveFS.exe", "googledrivesync.exe", "Dropbox.exe",
+    "DropboxUpdate.exe", "FileCoAuth.exe", "SharePoint.exe", "Box.exe", "BoxDrive.exe"
+]);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceRegistryEvents
+| where Timestamp >= ago(Lookback)
+| where ActionType in~ ("RegistryKeyCreated", "RegistryValueSet")
+| where RegistryKey contains @"\Explorer\SyncRootManager\"
+    or RegistryKey contains @"\SyncRootManager\"
+| where InitiatingProcessFileName !in~ (TrustedSyncProviders)
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage3b_CloudFilesSyncRoot",
+    StageDescription = "Cloud Files sync root registered by a non-standard process",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = RegistryKey,
+    AdditionalContext = strcat("RegistryValueName=", RegistryValueName, " | RegistryValueData=", RegistryValueData)
+| order by Timestamp desc

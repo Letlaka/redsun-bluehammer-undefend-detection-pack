@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone UnDefend Stage 6 hunt from 01_undefend_full_attack_chain.kql.
+//   Finds Defender update, signature, service, or engine failure telemetry.
+
+let Lookback = 2h;
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceEvents
+| where Timestamp >= ago(Lookback)
+| extend AdditionalFieldsText = tostring(AdditionalFields)
+| where ActionType in~ ("AntivirusDefinitionUpdateFailed", "AntivirusError", "AntivirusSignatureUpdateFailed")
+    or ActionType contains "UpdateFailed"
+    or ActionType contains "AntivirusError"
+    or AdditionalFieldsText contains "EngineUnavailable"
+    or AdditionalFieldsText contains "UpdateError"
+    or AdditionalFieldsText contains "SignatureUpdate"
+    or AdditionalFieldsText contains "Definition Updates"
+| where tolower(AdditionalFieldsText) has_any ("fail", "error", "unavailable", "stopped")
+    or ActionType contains "Failed"
+    or ActionType contains "Error"
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage6_DefenderUpdateOrEngineFailure",
+    StageDescription = "Defender update, signature, service, or engine failure telemetry observed",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = ActionType,
+    AdditionalContext = AdditionalFieldsText
+| order by Timestamp desc

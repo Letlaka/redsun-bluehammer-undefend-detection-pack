@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone RedSun Stage 6 hunt from 01_redsun_full_attack_chain.kql.
+//   Finds temporary-path reparse point or junction activity pointing to System32.
+
+let Lookback = 2h;
+let TargetFileName = "TieringEngineService.exe";
+let IsTempPath = (Path:string) {
+    tolower(Path) contains @"\appdata\local\temp\"
+    or tolower(Path) contains @"\windows\temp\"
+    or tolower(Path) startswith @"c:\temp\"
+    or tolower(Path) contains @"\temp\"
+};
+let NormalizePath = (FolderPath:string, FileName:string) {
+    iff(
+        isnotempty(FileName) and tolower(FolderPath) endswith strcat(@"\", tolower(FileName)),
+        FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceEvents
+| where Timestamp >= ago(Lookback)
+| extend
+    AdditionalFieldsText = tostring(AdditionalFields),
+    EventPath = NormalizePath(FolderPath, FileName)
+| where ActionType in~ ("DirectoryJunctionCreated", "SymbolicLinkCreated", "DeviceIoControl")
+    or AdditionalFieldsText has_any ("FSCTL_SET_REPARSE_POINT", "IO_REPARSE_TAG_MOUNT_POINT", "Junction", "Reparse")
+| where IsTempPath(EventPath)
+    or IsTempPath(InitiatingProcessFolderPath)
+    or IsTempPath(AdditionalFieldsText)
+| where AdditionalFieldsText contains @"windows\system32"
+    or tolower(EventPath) contains @"\windows\system32"
+    or AdditionalFieldsText contains TargetFileName
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage6_TempDirReparsePivot",
+    StageDescription = "Temporary-path reparse point or junction activity pointing toward System32",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = EventPath,
+    AdditionalContext = AdditionalFieldsText
+| order by Timestamp desc

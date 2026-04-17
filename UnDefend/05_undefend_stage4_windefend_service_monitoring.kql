@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone UnDefend Stage 4 hunt from 01_undefend_full_attack_chain.kql.
+//   Finds WinDefend service query or status-monitoring telemetry.
+
+let Lookback = 2h;
+let TrustedServiceQueryProcesses = dynamic([
+    "services.exe", "svchost.exe", "MsMpEng.exe", "SecurityHealthService.exe",
+    "MpCmdRun.exe", "msconfig.exe", "sc.exe", "powershell.exe", "pwsh.exe",
+    "taskmgr.exe", "mmc.exe", "WmiPrvSE.exe"
+]);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceEvents
+| where Timestamp >= ago(Lookback)
+| extend AdditionalFieldsText = tostring(AdditionalFields)
+| where AdditionalFieldsText contains "WinDefend"
+    or AdditionalFieldsText contains "Windows Defender"
+| where ActionType in~ ("OpenServiceHandle", "ServiceQuery", "ServiceControlManager")
+    or ActionType contains "Service"
+    or AdditionalFieldsText contains "QueryService"
+    or AdditionalFieldsText contains "NotifyServiceStatusChange"
+    or AdditionalFieldsText contains "OpenService"
+| where InitiatingProcessFileName !in~ (TrustedServiceQueryProcesses)
+| where isempty(InitiatingProcessAccountSid) or InitiatingProcessAccountSid != "S-1-5-18"
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage4_WinDefendServiceMonitoring",
+    StageDescription = "WinDefend service status or configuration queried by a non-standard process",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = ActionType,
+    AdditionalContext = AdditionalFieldsText
+| order by Timestamp desc

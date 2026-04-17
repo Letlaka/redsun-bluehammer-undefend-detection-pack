@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 2 hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds Defender update package downloads from go.microsoft.com by non-update processes.
+
+let Lookback = 2h;
+let TrustedUpdateAgents = dynamic([
+    "MsMpEng.exe", "MpCmdRun.exe", "WaaSMedicAgent.exe", "TiWorker.exe",
+    "svchost.exe", "wuauclt.exe", "MpSigStub.exe", "NisSrv.exe", "WdNisSvc.exe"
+]);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceNetworkEvents
+| where Timestamp >= ago(Lookback)
+| where RemoteUrl contains "go.microsoft.com"
+    and RemoteUrl contains "LinkID=121721"
+| where InitiatingProcessFileName !in~ (TrustedUpdateAgents)
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage2_DefenderUpdateCdnDownload",
+    StageDescription = "Defender update package URL requested by a non-update process",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = RemoteUrl,
+    AdditionalContext = strcat("RemoteIP=", RemoteIP, " | RemotePort=", tostring(RemotePort), " | RemoteUrl=", RemoteUrl)
+| order by Timestamp desc

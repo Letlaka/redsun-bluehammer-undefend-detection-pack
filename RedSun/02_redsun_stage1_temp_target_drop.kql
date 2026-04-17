@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone RedSun Stage 1 hunt from 01_redsun_full_attack_chain.kql.
+//   Finds TieringEngineService.exe staged in temporary paths.
+
+let Lookback = 2h;
+let TargetFileName = "TieringEngineService.exe";
+let IsTempPath = (Path:string) {
+    tolower(Path) contains @"\appdata\local\temp\"
+    or tolower(Path) contains @"\windows\temp\"
+    or tolower(Path) startswith @"c:\temp\"
+    or tolower(Path) contains @"\temp\"
+};
+let NormalizePath = (FolderPath:string, FileName:string) {
+    iff(
+        isnotempty(FileName) and tolower(FolderPath) endswith strcat(@"\", tolower(FileName)),
+        FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceFileEvents
+| where Timestamp >= ago(Lookback)
+| where ActionType in~ ("FileCreated", "FileModified", "FileRenamed")
+| where FileName =~ TargetFileName
+| where IsTempPath(FolderPath) or IsTempPath(PreviousFolderPath)
+| where InitiatingProcessFileName !in~ ("MsMpEng.exe", "SenseIR.exe", "SecurityHealthService.exe")
+| extend FilePath = NormalizePath(FolderPath, FileName)
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage1_TempTargetDrop",
+    StageDescription = "TieringEngineService.exe created, modified, or renamed in a temporary path",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = FilePath,
+    AdditionalContext = tostring(AdditionalFields)
+| order by Timestamp desc

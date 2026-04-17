@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone UnDefend Stage 5 hunt from 01_undefend_full_attack_chain.kql.
+//   Finds WinDefend service stop, disablement, or reconfiguration telemetry.
+
+let Lookback = 2h;
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceEvents
+| where Timestamp >= ago(Lookback)
+| extend AdditionalFieldsText = tostring(AdditionalFields)
+| where ActionType in~ ("ServiceStopped", "ServiceDisabled", "ServiceConfigurationChanged")
+    or (ActionType contains "Service" and AdditionalFieldsText has_any ("stopped", "disabled", "stop"))
+| where AdditionalFieldsText contains "WinDefend"
+    or AdditionalFieldsText contains "MsMpEng"
+    or AdditionalFieldsText contains "Windows Defender"
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage5_WinDefendServiceStopped",
+    StageDescription = "WinDefend service stopped, disabled, or reconfigured",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = ActionType,
+    AdditionalContext = AdditionalFieldsText
+| order by Timestamp desc

@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone UnDefend Stage 7 hunt from 01_undefend_full_attack_chain.kql.
+//   Finds MRT update directory access by non-system, non-MRT processes.
+
+let Lookback = 2h;
+let TrustedDefenderProcesses = dynamic([
+    "MsMpEng.exe", "MpCmdRun.exe", "NisSrv.exe", "SecurityHealthService.exe",
+    "MpDlpCmd.exe", "ConfigSecurityPolicy.exe", "MpSigStub.exe", "MRT.exe",
+    "TiWorker.exe", "TrustedInstaller.exe", "svchost.exe", "wuauclt.exe",
+    "UsoClient.exe", "MoUsoCoreWorker.exe"
+]);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+let IsMrtPath = (Path:string) {
+    tolower(Path) startswith @"c:\windows\system32\mrt"
+};
+DeviceFileEvents
+| where Timestamp >= ago(Lookback)
+| where IsMrtPath(FolderPath)
+| where InitiatingProcessFileName !in~ (TrustedDefenderProcesses)
+| where isempty(InitiatingProcessAccountSid) or InitiatingProcessAccountSid != "S-1-5-18"
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage7_MrtDirectoryAccess",
+    StageDescription = "MRT update directory accessed by a non-system, non-MRT process",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = NormalizePath(FolderPath, FileName),
+    AdditionalContext = strcat("ActionType=", ActionType, " | Path=", NormalizePath(FolderPath, FileName))
+| order by Timestamp desc

@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 6a hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds services installed with GUID-shaped service names.
+
+let Lookback = 2h;
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceEvents
+| where Timestamp >= ago(Lookback)
+| where ActionType == "ServiceInstalled"
+| extend
+    AdditionalFieldsText = tostring(AdditionalFields),
+    ParsedAdditionalFields = parse_json(AdditionalFields)
+| extend ServiceName = tostring(coalesce(ParsedAdditionalFields.ServiceName, ParsedAdditionalFields.Service, ParsedAdditionalFields.Name))
+| extend ServiceName = iff(isempty(ServiceName), extract(@"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", 0, AdditionalFieldsText), ServiceName)
+| where ServiceName matches regex @"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage6a_GuidNamedServiceInstalled",
+    StageDescription = "Windows service installed with a GUID-shaped service name",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = ServiceName,
+    AdditionalContext = AdditionalFieldsText
+| order by Timestamp desc

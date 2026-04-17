@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 5a hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds LSA boot-key registry subkey reads by non-standard processes.
+
+let Lookback = 2h;
+let TrustedLSACallers = dynamic([
+    "lsass.exe", "svchost.exe", "MsMpEng.exe", "WdNisSvc.exe",
+    "SecurityHealthService.exe", "services.exe"
+]);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceRegistryEvents
+| where Timestamp >= ago(Lookback)
+| where ActionType in~ ("RegistryKeyQueried", "RegistryValueQueried", "RegistryKeyAccessed")
+| where RegistryKey matches regex @"(?i)\\Control\\Lsa\\(JD|Skew1|GBG|Data)$"
+| where InitiatingProcessFileName !in~ (TrustedLSACallers)
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage5a_LsaBootKeyRegistryRead",
+    StageDescription = "LSA boot-key registry subkey read by a non-standard process",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = RegistryKey,
+    AdditionalContext = strcat("RegistryValueName=", RegistryValueName, " | RegistryValueData=", RegistryValueData)
+| order by Timestamp desc

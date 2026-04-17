@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone UnDefend Stage 3 hunt from 01_undefend_full_attack_chain.kql.
+//   Finds repeated Defender definition update directory access.
+
+let Lookback = 2h;
+let TrustedDefenderProcesses = dynamic([
+    "MsMpEng.exe", "MpCmdRun.exe", "NisSrv.exe", "SecurityHealthService.exe",
+    "MpDlpCmd.exe", "ConfigSecurityPolicy.exe", "MpSigStub.exe", "MRT.exe",
+    "TiWorker.exe", "TrustedInstaller.exe", "svchost.exe", "wuauclt.exe",
+    "UsoClient.exe", "MoUsoCoreWorker.exe"
+]);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+let IsTrustedDefenderPath = (Path:string) {
+    tolower(Path) startswith @"c:\programdata\microsoft\windows defender\"
+    or tolower(Path) startswith @"c:\program files\windows defender\"
+    or tolower(Path) startswith @"c:\program files\microsoft defender\"
+    or tolower(Path) startswith @"c:\program files\windows defender advanced threat protection\"
+};
+let IsDefenderDefinitionPath = (Path:string) {
+    tolower(Path) contains @"\programdata\microsoft\windows defender\definition updates"
+    or tolower(Path) contains @"\windows defender\definition updates"
+};
+DeviceFileEvents
+| where Timestamp >= ago(Lookback)
+| where ActionType in~ ("FileAccessed", "FileRead", "FileOpened", "DirectoryRead")
+| where IsDefenderDefinitionPath(FolderPath)
+| where InitiatingProcessFileName !in~ (TrustedDefenderProcesses)
+| where not(IsTrustedDefenderPath(InitiatingProcessFolderPath))
+| summarize
+    Timestamp = min(Timestamp),
+    LastSeen = max(Timestamp),
+    AccessCount = count(),
+    DeviceName = any(DeviceName),
+    ReportId = any(ReportId),
+    FileNames = make_set(FileName, 20),
+    FolderPaths = make_set(FolderPath, 10),
+    ProcessCommandLine = any(InitiatingProcessCommandLine),
+    AccountName = any(InitiatingProcessAccountName),
+    AccountSid = any(InitiatingProcessAccountSid)
+  by DeviceId, ProcessName = InitiatingProcessFileName, ProcessPath = InitiatingProcessFolderPath, ProcessId = InitiatingProcessId, Bucket = bin(Timestamp, 5m)
+| where AccessCount >= 3
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage3_DefenderUpdateDirectoryMonitoring",
+    StageDescription = "Repeated Defender definition update directory access by a non-Defender process",
+    ProcessName,
+    ProcessPath = NormalizePath(ProcessPath, ProcessName),
+    ProcessCommandLine,
+    AccountName,
+    AccountSid,
+    Evidence = strcat("AccessCount=", tostring(AccessCount)),
+    AdditionalContext = strcat("LastSeen=", tostring(LastSeen), " | FileNames=", tostring(FileNames), " | FolderPaths=", tostring(FolderPaths))
+| order by Timestamp desc

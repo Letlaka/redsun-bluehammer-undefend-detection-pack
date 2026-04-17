@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 3a hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds a temp executable written near an EICAR antivirus detection.
+
+let Lookback = 2h;
+let IsTempPath = (Path:string) {
+    tolower(Path) contains @"\appdata\local\temp\"
+    or tolower(Path) contains @"\windows\temp\"
+    or tolower(Path) startswith @"c:\temp\"
+    or tolower(Path) contains @"\temp\"
+};
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceFileEvents
+| where Timestamp >= ago(Lookback)
+| where ActionType in~ ("FileCreated", "FileModified", "FileRenamed")
+| where IsTempPath(FolderPath) or IsTempPath(PreviousFolderPath)
+| where FileName endswith ".exe" or FileName endswith ".com"
+| join kind=inner (
+    DeviceEvents
+    | where Timestamp >= ago(Lookback)
+    | where ActionType == "AntivirusDetection"
+    | where tostring(AdditionalFields) has "EICAR"
+    | project DeviceId, EicarTime = Timestamp, EicarReportId = ReportId, EicarDetails = tostring(AdditionalFields)
+) on DeviceId
+| where Timestamp between (EicarTime - 30s .. EicarTime + 30s)
+| extend FilePath = NormalizePath(FolderPath, FileName)
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage3a_EicarTempExecutable",
+    StageDescription = "Executable written in a temporary path within 30 seconds of an EICAR antivirus detection",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = FilePath,
+    AdditionalContext = strcat("EicarTime=", tostring(EicarTime), " | EicarDetails=", EicarDetails)
+| order by Timestamp desc

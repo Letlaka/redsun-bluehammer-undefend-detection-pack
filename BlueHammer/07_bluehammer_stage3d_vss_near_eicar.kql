@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 3d hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds VSS activity near an EICAR antivirus detection.
+
+let Lookback = 2h;
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceProcessEvents
+| where Timestamp >= ago(Lookback)
+| where FileName =~ "vssvc.exe"
+    or ProcessCommandLine has_any ("vssadmin", "VSSVC", "shadow copy")
+| join kind=inner (
+    DeviceEvents
+    | where Timestamp >= ago(Lookback)
+    | where ActionType == "AntivirusDetection"
+    | where tostring(AdditionalFields) has "EICAR"
+    | project DeviceId, EicarTime = Timestamp, EicarDetails = tostring(AdditionalFields)
+) on DeviceId
+| where Timestamp between (EicarTime - 10m .. EicarTime + 10m)
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage3d_VssNearEicar",
+    StageDescription = "VSS process activity within 10 minutes of an EICAR antivirus detection",
+    ProcessName = FileName,
+    ProcessPath = NormalizePath(FolderPath, FileName),
+    ProcessCommandLine,
+    AccountName,
+    AccountSid,
+    Evidence = ProcessCommandLine,
+    AdditionalContext = strcat("EicarTime=", tostring(EicarTime), " | EicarDetails=", EicarDetails, " | Parent=", InitiatingProcessFileName)
+| order by Timestamp desc

@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 4b hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds session namespace symbolic-link activity involving BaseNamedObjects.
+
+let Lookback = 2h;
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceEvents
+| where Timestamp >= ago(Lookback)
+| extend AdditionalFieldsText = tostring(AdditionalFields)
+| where ActionType in~ ("CreateSymbolicLink", "NtCreateSymbolicLinkObject", "ObjectAccess", "SymbolicLinkCreated")
+    or AdditionalFieldsText contains "SymbolicLink"
+| where AdditionalFieldsText contains @"\Sessions\"
+    and AdditionalFieldsText contains "BaseNamedObjects"
+| where InitiatingProcessFileName !in~ ("svchost.exe", "csrss.exe", "smss.exe", "lsass.exe", "wininit.exe")
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage4b_SessionNamespaceSymlink",
+    StageDescription = "Session namespace symbolic-link activity involving BaseNamedObjects",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = AdditionalFieldsText,
+    AdditionalContext = AdditionalFieldsText
+| order by Timestamp desc

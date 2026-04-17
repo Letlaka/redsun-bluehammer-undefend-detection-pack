@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone RedSun Stage 7 hunt from 01_redsun_full_attack_chain.kql.
+//   Finds batch oplock requests from temporary-path processes against VSS or Defender-related targets.
+
+let Lookback = 2h;
+let TargetFileName = "TieringEngineService.exe";
+let IsTempPath = (Path:string) {
+    tolower(Path) contains @"\appdata\local\temp\"
+    or tolower(Path) contains @"\windows\temp\"
+    or tolower(Path) startswith @"c:\temp\"
+    or tolower(Path) contains @"\temp\"
+};
+let NormalizePath = (FolderPath:string, FileName:string) {
+    iff(
+        isnotempty(FileName) and tolower(FolderPath) endswith strcat(@"\", tolower(FileName)),
+        FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceEvents
+| where Timestamp >= ago(Lookback)
+| extend AdditionalFieldsText = tostring(AdditionalFields)
+| where ActionType =~ "DeviceIoControl"
+    or AdditionalFieldsText has_any ("FSCTL_REQUEST_BATCH_OPLOCK", "REQUEST_BATCH_OPLOCK")
+| where AdditionalFieldsText has_any ("FSCTL_REQUEST_BATCH_OPLOCK", "REQUEST_BATCH_OPLOCK", "BatchOplock")
+| where IsTempPath(InitiatingProcessFolderPath) or IsTempPath(InitiatingProcessCommandLine)
+| where AdditionalFieldsText has_any (
+    "HarddiskVolumeShadowCopy",
+    "GLOBALROOT",
+    "VSS",
+    "mpavbase",
+    "mpengine"
+)
+    or AdditionalFieldsText contains TargetFileName
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage7_BatchOplockVss",
+    StageDescription = "Batch oplock request from temporary-path process against VSS or Defender-related target",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = AdditionalFieldsText,
+    AdditionalContext = AdditionalFieldsText
+| order by Timestamp desc

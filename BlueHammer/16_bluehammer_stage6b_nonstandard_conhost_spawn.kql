@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 6b hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds conhost.exe spawned from a non-standard parent chain.
+
+let Lookback = 2h;
+let IsTempPath = (Path:string) {
+    tolower(Path) contains @"\appdata\local\temp\"
+    or tolower(Path) contains @"\windows\temp\"
+    or tolower(Path) startswith @"c:\temp\"
+    or tolower(Path) contains @"\temp\"
+};
+let IsUserWritablePath = (Path:string) {
+    tolower(Path) contains @"\users\"
+    or tolower(Path) contains @"\programdata\"
+    or IsTempPath(Path)
+};
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceProcessEvents
+| where Timestamp >= ago(Lookback)
+| where FileName =~ "conhost.exe"
+| extend ParentPathLower = tolower(InitiatingProcessFolderPath)
+| where InitiatingProcessFileName !in~ (
+    "csrss.exe", "cmd.exe", "powershell.exe", "pwsh.exe",
+    "WindowsTerminal.exe", "wt.exe", "conhost.exe"
+)
+| where InitiatingProcessParentFileName !in~ ("csrss.exe", "wininit.exe", "smss.exe")
+| where IsUserWritablePath(InitiatingProcessFolderPath)
+    or not(
+        ParentPathLower startswith @"c:\windows\system32\"
+        or ParentPathLower startswith @"c:\windows\syswow64\"
+        or ParentPathLower startswith @"c:\windows\servicing\"
+        or ParentPathLower startswith @"c:\windows\winsxs\"
+    )
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage6b_NonstandardConhostSpawn",
+    StageDescription = "conhost.exe spawned from a non-standard parent chain",
+    ProcessName = FileName,
+    ProcessPath = NormalizePath(FolderPath, FileName),
+    ProcessCommandLine,
+    AccountName,
+    AccountSid,
+    Evidence = ProcessCommandLine,
+    AdditionalContext = strcat("Parent=", InitiatingProcessFileName, " | ParentCommandLine=", InitiatingProcessCommandLine)
+| order by Timestamp desc

@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 4d hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds SAM, SYSTEM, SECURITY, or NTDS hive reads from VSS paths.
+
+let Lookback = 2h;
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceFileEvents
+| where Timestamp >= ago(Lookback)
+| extend
+    FilePath = NormalizePath(FolderPath, FileName),
+    FilePathLower = tolower(NormalizePath(FolderPath, FileName))
+| where FilePathLower contains "harddiskvolumeshadowcopy"
+| where FilePathLower matches regex @"\\windows\\system32\\config\\(sam|system|security|ntds\.dit)$"
+    or FileName in~ ("SAM", "SYSTEM", "SECURITY", "NTDS.dit")
+| where InitiatingProcessFileName !in~ ("svchost.exe", "wbengine.exe", "vssvc.exe", "WinBackup.exe", "robocopy.exe", "xcopy.exe")
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage4d_VssHiveRead",
+    StageDescription = "SAM, SYSTEM, SECURITY, or NTDS hive read from a VSS path",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = FilePath,
+    AdditionalContext = strcat("ActionType=", ActionType, " | Path=", FilePath)
+| order by Timestamp desc

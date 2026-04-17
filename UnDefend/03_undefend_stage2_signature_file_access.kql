@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone UnDefend Stage 2 hunt from 01_undefend_full_attack_chain.kql.
+//   Finds Defender signature or definition file access by non-Defender processes.
+
+let Lookback = 2h;
+let TrustedDefenderProcesses = dynamic([
+    "MsMpEng.exe", "MpCmdRun.exe", "NisSrv.exe", "SecurityHealthService.exe",
+    "MpDlpCmd.exe", "ConfigSecurityPolicy.exe", "MpSigStub.exe", "MRT.exe",
+    "TiWorker.exe", "TrustedInstaller.exe", "svchost.exe", "wuauclt.exe",
+    "UsoClient.exe", "MoUsoCoreWorker.exe"
+]);
+let SignatureFiles = dynamic([
+    "mpavbase.vdm", "mpavbase.lkg", "mpasbase.vdm", "mpasbase.lkg",
+    "mpavdlta.vdm", "mpasdlta.vdm"
+]);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+let IsTrustedDefenderPath = (Path:string) {
+    tolower(Path) startswith @"c:\programdata\microsoft\windows defender\"
+    or tolower(Path) startswith @"c:\program files\windows defender\"
+    or tolower(Path) startswith @"c:\program files\microsoft defender\"
+    or tolower(Path) startswith @"c:\program files\windows defender advanced threat protection\"
+};
+let IsDefenderDefinitionPath = (Path:string) {
+    tolower(Path) contains @"\programdata\microsoft\windows defender\definition updates"
+    or tolower(Path) contains @"\windows defender\definition updates"
+};
+DeviceFileEvents
+| where Timestamp >= ago(Lookback)
+| where ActionType in~ ("FileAccessed", "FileRead", "FileOpened", "FileModified")
+| where FileName in~ (SignatureFiles)
+| where IsDefenderDefinitionPath(FolderPath)
+| where InitiatingProcessFileName !in~ (TrustedDefenderProcesses)
+| where not(IsTrustedDefenderPath(InitiatingProcessFolderPath))
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage2_SignatureFileAccess",
+    StageDescription = "Defender signature or definition file accessed by a non-Defender process",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = NormalizePath(FolderPath, FileName),
+    AdditionalContext = strcat("ActionType=", ActionType, " | Path=", NormalizePath(FolderPath, FileName))
+| order by Timestamp desc

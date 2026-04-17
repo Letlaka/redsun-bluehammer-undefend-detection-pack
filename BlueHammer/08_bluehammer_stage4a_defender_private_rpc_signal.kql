@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 4a hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds Defender private RPC/ALPC markers from non-standard processes.
+
+let Lookback = 2h;
+let TrustedMpRPCCallers = dynamic([
+    "MsMpEng.exe", "MpCmdRun.exe", "svchost.exe", "SecurityHealthService.exe",
+    "WdNisSvc.exe", "NisSrv.exe"
+]);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceEvents
+| where Timestamp >= ago(Lookback)
+| extend AdditionalFieldsText = tostring(AdditionalFields)
+| where AdditionalFieldsText contains "IMpService"
+    or AdditionalFieldsText contains "c503f532"
+    or AdditionalFieldsText contains "IMpService77BDAF73"
+    or AdditionalFieldsText contains "ServerMpUpdateEngineSignature"
+    or AdditionalFieldsText contains "Proc42"
+    or (ActionType contains "NamedPipe" and (AdditionalFieldsText contains "IMpService" or AdditionalFieldsText contains "MpService"))
+| where InitiatingProcessFileName !in~ (TrustedMpRPCCallers)
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage4a_DefenderPrivateRpcSignal",
+    StageDescription = "Defender private RPC/ALPC marker observed from a non-standard process",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = AdditionalFieldsText,
+    AdditionalContext = AdditionalFieldsText
+| order by Timestamp desc

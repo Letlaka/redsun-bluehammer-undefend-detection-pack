@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 4c hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds Defender definition update directory reads by non-standard processes.
+
+let Lookback = 2h;
+let TrustedDefenderProcesses = dynamic([
+    "MsMpEng.exe", "MpCmdRun.exe", "svchost.exe", "NisSrv.exe", "WdNisSvc.exe",
+    "SecurityHealthService.exe", "TrustedInstaller.exe", "TiWorker.exe",
+    "WaaSMedicAgent.exe", "MpSigStub.exe"
+]);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceFileEvents
+| where Timestamp >= ago(Lookback)
+| extend FolderPathLower = tolower(FolderPath)
+| where FolderPathLower startswith @"c:\programdata\microsoft\windows defender\definition updates"
+| where ActionType in~ ("FileAccessed", "DirectoryRead", "FileRead", "FileOpened")
+| where InitiatingProcessFileName !in~ (TrustedDefenderProcesses)
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage4c_DefenderDefinitionDirectoryRead",
+    StageDescription = "Defender definition update directory read or monitored by a non-standard process",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = NormalizePath(FolderPath, FileName),
+    AdditionalContext = strcat("ActionType=", ActionType, " | Path=", NormalizePath(FolderPath, FileName))
+| order by Timestamp desc

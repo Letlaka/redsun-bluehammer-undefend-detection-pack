@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 5b hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds samlib.dll or offreg.dll loaded by non-standard processes.
+
+let Lookback = 2h;
+let TrustedSamCallers = dynamic([
+    "lsass.exe", "svchost.exe", "logonui.exe", "winlogon.exe", "services.exe"
+]);
+let IsTempPath = (Path:string) {
+    tolower(Path) contains @"\appdata\local\temp\"
+    or tolower(Path) contains @"\windows\temp\"
+    or tolower(Path) startswith @"c:\temp\"
+    or tolower(Path) contains @"\temp\"
+};
+let IsUserWritablePath = (Path:string) {
+    tolower(Path) contains @"\users\"
+    or tolower(Path) contains @"\programdata\"
+    or IsTempPath(Path)
+};
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceImageLoadEvents
+| where Timestamp >= ago(Lookback)
+| where FileName in~ ("samlib.dll", "offreg.dll")
+| where InitiatingProcessFileName !in~ (TrustedSamCallers)
+| where FileName =~ "offreg.dll"
+    or IsUserWritablePath(InitiatingProcessFolderPath)
+    or InitiatingProcessVersionInfoCompanyName !~ "Microsoft Corporation"
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage5b_SamlibOrOffregLoad",
+    StageDescription = "samlib.dll or offreg.dll dynamically loaded by a non-standard process",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = NormalizePath(FolderPath, FileName),
+    AdditionalContext = strcat("LoadedLibrary=", FileName, " | LibraryPath=", FolderPath)
+| order by Timestamp desc

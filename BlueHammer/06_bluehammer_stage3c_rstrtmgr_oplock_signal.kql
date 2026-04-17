@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 3c hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds RstrtMgr.dll file-control or oplock-adjacent telemetry.
+
+let Lookback = 2h;
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceEvents
+| where Timestamp >= ago(Lookback)
+| extend AdditionalFieldsText = tostring(AdditionalFields)
+| where ActionType in~ ("FileOpened", "DeviceIoControl", "DeviceIoControlFile", "OtherAlertRelatedActivity")
+    or AdditionalFieldsText contains "FSCTL_REQUEST_BATCH_OPLOCK"
+    or AdditionalFieldsText contains "REQUEST_BATCH_OPLOCK"
+    or AdditionalFieldsText contains "BatchOplock"
+| where AdditionalFieldsText contains "RstrtMgr"
+    or FileName =~ "RstrtMgr.dll"
+    or FolderPath contains "RstrtMgr.dll"
+| where InitiatingProcessFileName !in~ ("svchost.exe", "TrustedInstaller.exe", "MsMpEng.exe", "msiexec.exe", "rrsetup.exe")
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage3c_RstrtMgrOplockSignal",
+    StageDescription = "RstrtMgr.dll file-control or oplock-related telemetry from a non-standard process",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = NormalizePath(FolderPath, FileName),
+    AdditionalContext = AdditionalFieldsText
+| order by Timestamp desc
