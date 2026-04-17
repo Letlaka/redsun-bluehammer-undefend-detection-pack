@@ -8,20 +8,6 @@ This repository, `redsun-bluehammer-undefend-detection-pack`, contains Microsoft
 
 The content is designed for security research, detection engineering, lab validation, and controlled hunting workflows. It is not a drop-in production detection set. Each environment has different Defender XDR sensor coverage, event volumes, endpoint baselines, software inventory, and legitimate administrative behavior. You must validate both syntax and detection quality in your own tenant before enabling these queries as scheduled custom detections.
 
-## GitHub Metadata
-
-Suggested repository name:
-
-`redsun-bluehammer-undefend-detection-pack`
-
-Suggested GitHub description:
-
-`Microsoft Defender XDR KQL detections for RedSun, BlueHammer, UnDefend, and CVE-2026-33825-related Defender abuse behaviors.`
-
-Suggested GitHub topics:
-
-`redsun`, `bluehammer`, `undefend`, `microsoft-defender`, `defender-xdr`, `microsoft-defender-xdr`, `kql`, `advanced-hunting`, `threat-detection`, `detection-engineering`, `cve-2026-33825`, `privilege-escalation`, `windows-security`
-
 ## Repository Layout
 
 Each detection family is isolated in its own folder. Inside each folder, numbering starts at `01` and is sequential.
