@@ -41,6 +41,36 @@ Each folder follows this file pattern:
 
 Numbering must be sequential inside each folder and must start at `01`.
 
+## Branch Management Strategy
+
+This repository uses a lightweight GitHub Flow model. The `main` branch is the public source of truth and should always represent content that is ready for public review and reuse.
+
+Use short-lived branches for all changes:
+
+- `fix/*` for KQL syntax, schema compatibility, or documentation corrections.
+- `tune/*` for false-positive reduction, performance tuning, and threshold changes.
+- `docs/*` for documentation-only updates.
+- `feature/*` for new detection stages, packages, or larger enhancements.
+- `ci/*` for repository validation, automation, and GitHub Actions changes.
+
+Keep each branch focused on one concern. Do not mix unrelated documentation, detection logic, tuning, and automation changes in the same branch or pull request.
+
+Public branch and history expectations:
+
+- Do not force-push or rewrite the public `main` branch.
+- Merge changes into `main` through pull requests.
+- Delete short-lived branches after merge.
+- Use tags for public release points after the changelog is updated.
+- Prefer dated release tags such as `v2026.04.19` unless a semantic version is needed for downstream tooling.
+
+Recommended `main` branch protection:
+
+- Require pull requests before merging.
+- Require review for detection logic, false-positive tuning, and CI changes.
+- Require all conversations to be resolved before merge.
+- Require validation checks once GitHub Actions checks are available.
+- Disable force pushes and branch deletion on `main`.
+
 ## KQL Style Guidelines
 
 Use these conventions for KQL changes:
