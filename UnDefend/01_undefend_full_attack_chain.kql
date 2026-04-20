@@ -191,6 +191,25 @@ let AllStages =
                 DeviceEvents
                 | where Timestamp >= ago(Lookback)
                 | extend AdditionalFieldsText = tostring(AdditionalFields)
+                | extend
+                    HasEventId2001 = AdditionalFieldsText contains "EventID=2001"
+                        or AdditionalFieldsText contains "EventId=2001"
+                        or AdditionalFieldsText contains @"""EventID"":2001"
+                        or AdditionalFieldsText contains @"""EventId"":2001"
+                        or AdditionalFieldsText contains "Event ID 2001",
+                    HasDefenderUpdateContext = AdditionalFieldsText has_any (
+                        "WinDefend",
+                        "Windows Defender",
+                        "Microsoft Defender",
+                        "MsMpEng",
+                        "SignatureUpdate",
+                        "Definition Updates",
+                        "Antivirus",
+                        "Engine",
+                        "Security intelligence"
+                    )
+                    or ActionType contains "Antivirus"
+                    or ActionType contains "Defender"
                 | where ActionType in~ ("AntivirusDefinitionUpdateFailed", "AntivirusError", "AntivirusSignatureUpdateFailed")
                     or ActionType contains "UpdateFailed"
                     or ActionType contains "AntivirusError"
@@ -198,9 +217,11 @@ let AllStages =
                     or AdditionalFieldsText contains "UpdateError"
                     or AdditionalFieldsText contains "SignatureUpdate"
                     or AdditionalFieldsText contains "Definition Updates"
+                    or (HasEventId2001 and HasDefenderUpdateContext)
                 | where tolower(AdditionalFieldsText) has_any ("fail", "error", "unavailable", "stopped")
                     or ActionType contains "Failed"
                     or ActionType contains "Error"
+                    or HasEventId2001
                 | project
                     Timestamp,
                     DeviceId,

@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone RedSun Stage 9 hunt from 01_redsun_full_attack_chain.kql.
+//   Finds Storage Tiers Management COM activation markers from non-system
+//   or non-standard processes.
+
+let Lookback = 2h;
+let StorageTiersClsid = "50d185b9-fff3-4656-92c7-e4018da4361d";
+let TrustedStorageTiersComCallers = dynamic([
+    "svchost.exe", "services.exe", "dllhost.exe", "TiWorker.exe",
+    "TrustedInstaller.exe", "ServerManager.exe", "mmc.exe"
+]);
+let IsTempPath = (Path:string) {
+    tolower(Path) contains @"\appdata\local\temp\"
+    or tolower(Path) contains @"\windows\temp\"
+    or tolower(Path) startswith @"c:\temp\"
+    or tolower(Path) contains @"\temp\"
+};
+let NormalizePath = (FolderPath:string, FileName:string) {
+    iff(
+        isnotempty(FileName) and tolower(FolderPath) endswith strcat(@"\", tolower(FileName)),
+        FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceEvents
+| where Timestamp >= ago(Lookback)
+| extend AdditionalFieldsText = tostring(AdditionalFields)
+| where AdditionalFieldsText contains StorageTiersClsid
+    or AdditionalFieldsText contains "Storage Tiers"
+    or AdditionalFieldsText contains "StorageTiers"
+    or AdditionalFieldsText contains "LaunchTierManagementEng"
+| where InitiatingProcessFileName !in~ (TrustedStorageTiersComCallers)
+    or isempty(InitiatingProcessAccountSid)
+    or InitiatingProcessAccountSid != "S-1-5-18"
+    or IsTempPath(InitiatingProcessFolderPath)
+    or IsTempPath(InitiatingProcessCommandLine)
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage9_StorageTiersComActivation",
+    StageDescription = "Storage Tiers Management COM activation marker observed from a non-system or non-standard process",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = AdditionalFieldsText,
+    AdditionalContext = AdditionalFieldsText
+| order by Timestamp desc

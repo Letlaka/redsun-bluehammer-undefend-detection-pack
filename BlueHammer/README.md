@@ -4,9 +4,11 @@
 
 ## Purpose
 
-The BlueHammer package contains Microsoft Defender XDR Advanced Hunting queries for a multi-stage proof-of-concept chain involving Windows Update API activity, Defender update package retrieval, Cloud Files callback abuse, VSS activity, SAM and registry access, local password changes, GUID-named service creation, and unusual process spawning.
+The BlueHammer package contains Microsoft Defender XDR Advanced Hunting queries for a multi-stage proof-of-concept chain involving Windows Update API activity, Defender update package retrieval, Cloud Files callback abuse, VSS activity, SAM and registry access, local password changes, GUID-named service creation, unusual process spawning, and Microsoft Defender detection-name telemetry.
 
 The package is built as a correlation hunt. Several individual stages are intentionally weak when viewed alone, but become meaningful when they occur together on the same device within the correlation window.
+
+The research report dated April 19, 2026 maps BlueHammer to CVE-2026-33825 and notes public reporting of a Microsoft Defender Antimalware Platform fix at version 4.18.26050.3011. These queries are still behavior and telemetry hunts; they do not replace patch verification.
 
 ## File Layout
 
@@ -25,9 +27,10 @@ The package is built as a correlation hunt. Several individual stages are intent
 | `11_bluehammer_stage4d_vss_hive_read.kql` | Stage 4d: SAM, SYSTEM, SECURITY, or NTDS hive read from VSS path. |
 | `12_bluehammer_stage5a_lsa_bootkey_registry_read.kql` | Stage 5a: LSA boot-key registry subkey read. |
 | `13_bluehammer_stage5b_samlib_or_offreg_load.kql` | Stage 5b: suspicious `samlib.dll` or `offreg.dll` load. |
-| `14_bluehammer_stage5c_local_password_change_burst.kql` | Stage 5c: burst of local password changes or account modifications. |
+| `14_bluehammer_stage5c_local_password_change_burst.kql` | Stage 5c: burst of local password changes, account modifications, or public password-marker telemetry. |
 | `15_bluehammer_stage6a_guid_named_service_installed.kql` | Stage 6a: service installed with GUID-shaped service name. |
 | `16_bluehammer_stage6b_nonstandard_conhost_spawn.kql` | Stage 6b: `conhost.exe` spawned from a non-standard parent chain. |
+| `17_bluehammer_stage7_microsoft_detection_name.kql` | Stage 7: Microsoft Defender BlueHammer detection-name telemetry. |
 
 ## Main Query Behavior
 
@@ -41,7 +44,7 @@ Important behavior:
 - Stages are materialized once into `AllStages`.
 - The query expands stage rows into stepped time buckets instead of using a wide self-join.
 - `summarize hint.strategy = shuffle` is used for the high-cardinality grouping step.
-- The final result requires multiple stages and a BlueHammer anchor condition.
+- The final result requires multiple stages and a BlueHammer anchor condition, except Microsoft Defender BlueHammer detection-name telemetry can stand alone as `Critical`.
 
 The main query is preferred for incident-level review. Standalone queries are preferred for troubleshooting, tuning, and validating individual stage behavior.
 
@@ -208,7 +211,7 @@ Tuning notes:
 
 ### Stage 5c: Local Password Change Burst
 
-Detects four or more local account password change or account modification events within a two-minute window by the same process.
+Detects four or more local account password change or account modification events within a two-minute window by the same process. It also flags the public `$PWNed666!!!WDFAIL` marker when it appears in `AdditionalFields` or command-line telemetry.
 
 Primary table:
 
@@ -217,6 +220,7 @@ Primary table:
 Tuning notes:
 
 - Password rotation tools and local account management products may trigger this.
+- Lab validation can intentionally trigger the public marker; record those tests before tuning.
 
 ### Stage 6a: GUID-Named Service Installed
 
@@ -242,6 +246,18 @@ Tuning notes:
 
 - Remote admin tooling, terminal products, and automation agents may require allowlisting.
 
+### Stage 7: Microsoft Detection Name
+
+Detects Microsoft Defender antivirus telemetry that contains BlueHammer-associated detection names or stable substrings such as `Behavior:Win32/CVE-2026-33825.Z!MTB`, `Exploit:Win32/DfndrPEBluHmr.BB`, `CVE-2026-33825`, or `DfndrPEBluHmr`.
+
+Primary table:
+
+- `DeviceEvents`
+
+Why it matters:
+
+- This is high-signal vendor detection telemetry and is treated as `Critical` by the full-chain query even if no other stage is visible.
+
 ## Anchor Logic
 
 The composite query includes an anchor requirement to reduce false positives. This prevents weak combinations such as ordinary `samlib.dll` loads plus normal `conhost.exe` behavior from producing noisy results.
@@ -249,6 +265,7 @@ The composite query includes an anchor requirement to reduce false positives. Th
 High-value anchors include:
 
 - Defender update CDN download by non-update process.
+- Microsoft Defender BlueHammer detection-name telemetry.
 - Cloud Files sync root registration.
 - VSS hive read.
 - LSA boot-key registry read.
@@ -257,7 +274,7 @@ High-value anchors include:
 
 ## Expected Analyst Workflow
 
-1. Run standalone stages `02` through `16`.
+1. Run standalone stages `02` through `17`.
 2. Identify which stages are noisy in your tenant.
 3. Tune trusted process arrays and path filters.
 4. Run `01_bluehammer_full_attack_chain.kql`.
@@ -277,6 +294,7 @@ Potential benign sources include:
 - Software installers.
 - Remote support products.
 - Developer or administrative scripts.
+- Lab antivirus detections or validation simulations.
 
 ## Production Deployment Guidance
 
@@ -286,6 +304,7 @@ Use standalone queries for baselining first. For production alerting, consider r
 - LSA boot-key read plus any other stage.
 - GUID service installation plus any other stage.
 - Defender update CDN download plus Cloud Files or VSS activity.
+- Microsoft Defender BlueHammer detection-name telemetry.
 - Four or more total stages in the main query.
 
 Avoid scheduled alerts on weak standalone stages without tuning. Stages such as Windows Update DLL load, directory reads, `samlib.dll` loads, or `conhost.exe` behavior can be noisy in enterprise environments.

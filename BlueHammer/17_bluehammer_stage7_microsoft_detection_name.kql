@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone BlueHammer Stage 7 hunt from 01_bluehammer_full_attack_chain.kql.
+//   Finds Microsoft Defender threat detection names associated with BlueHammer.
+
+let Lookback = 2h;
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceEvents
+| where Timestamp >= ago(Lookback)
+| extend AdditionalFieldsText = tostring(AdditionalFields)
+| where ActionType == "AntivirusDetection"
+    or ActionType contains "Antivirus"
+    or AdditionalFieldsText contains "ThreatName"
+| where AdditionalFieldsText contains "Behavior:Win32/CVE-2026-33825.Z!MTB"
+    or AdditionalFieldsText contains "Exploit:Win32/DfndrPEBluHmr.BB"
+    or AdditionalFieldsText contains "CVE-2026-33825"
+    or AdditionalFieldsText contains "DfndrPEBluHmr"
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage7_MicrosoftDetectionName",
+    StageDescription = "Microsoft Defender threat detection name associated with BlueHammer observed",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = AdditionalFieldsText,
+    AdditionalContext = AdditionalFieldsText
+| order by Timestamp desc

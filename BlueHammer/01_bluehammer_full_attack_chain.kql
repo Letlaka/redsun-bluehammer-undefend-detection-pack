@@ -3,9 +3,10 @@
 // AI-generated detection content. Review, test, tune, and verify before production use.
 
 // Purpose:
-//   Main BlueHammer composite runner for standalone 02-16 stage hunts.
+//   Main BlueHammer composite runner for standalone 02-17 stage hunts.
 //   Correlates Windows Update, Defender update, Cloud Files, VSS/SAM,
-//   offline registry, account manipulation, and service/token execution signals.
+//   offline registry, account manipulation, service/token execution, and
+//   Microsoft detection-name signals.
 //
 // Notes:
 //   Several low-level primitives, such as raw oplock and object-manager symlink
@@ -364,32 +365,37 @@ let AllStages =
             (
                 DeviceEvents
                 | where Timestamp >= ago(Lookback)
+                | extend AdditionalFieldsText = tostring(AdditionalFields)
+                | extend HasPublicPasswordMarker = AdditionalFieldsText contains "$PWNed666!!!WDFAIL"
+                    or InitiatingProcessCommandLine contains "$PWNed666!!!WDFAIL"
                 | where ActionType in~ ("UserAccountPasswordChanged", "UserAccountModified")
+                    or HasPublicPasswordMarker
                 | summarize
                     Timestamp = min(Timestamp),
                     LastSeen = max(Timestamp),
-                    PasswordChanges = count(),
+                    PasswordChanges = countif(ActionType in~ ("UserAccountPasswordChanged", "UserAccountModified")),
+                    MarkerHits = countif(HasPublicPasswordMarker),
                     DeviceName = any(DeviceName),
                     ReportId = any(ReportId),
-                    Accounts = make_set(tostring(AdditionalFields), 20),
+                    Accounts = make_set(AdditionalFieldsText, 20),
                     ProcessCommandLine = any(InitiatingProcessCommandLine),
                     AccountName = any(InitiatingProcessAccountName),
                     AccountSid = any(InitiatingProcessAccountSid)
                   by DeviceId, ProcessName = InitiatingProcessFileName, ProcessPath = InitiatingProcessFolderPath, WindowBucket = bin(Timestamp, 2m)
-                | where PasswordChanges >= 4
+                | where PasswordChanges >= 4 or MarkerHits > 0
                 | project
                     Timestamp,
                     DeviceId,
                     DeviceName,
                     ReportId,
                     Stage = "Stage5c_LocalPasswordChangeBurst",
-                    StageDescription = "Burst of local account password change or modification events within two minutes",
+                    StageDescription = "Burst of local account password change or modification events within two minutes, or public BlueHammer password marker observed",
                     ProcessName,
                     ProcessPath = NormalizePath(ProcessPath, ProcessName),
                     ProcessCommandLine,
                     AccountName,
                     AccountSid,
-                    Evidence = strcat("PasswordChanges=", tostring(PasswordChanges)),
+                    Evidence = strcat("PasswordChanges=", tostring(PasswordChanges), " | MarkerHits=", tostring(MarkerHits)),
                     AdditionalContext = strcat("LastSeen=", tostring(LastSeen), " | Accounts=", tostring(Accounts))
             ),
             (
@@ -448,6 +454,32 @@ let AllStages =
                     AccountSid,
                     Evidence = ProcessCommandLine,
                     AdditionalContext = strcat("Parent=", InitiatingProcessFileName, " | ParentCommandLine=", InitiatingProcessCommandLine)
+            ),
+            (
+                DeviceEvents
+                | where Timestamp >= ago(Lookback)
+                | extend AdditionalFieldsText = tostring(AdditionalFields)
+                | where ActionType == "AntivirusDetection"
+                    or ActionType contains "Antivirus"
+                    or AdditionalFieldsText contains "ThreatName"
+                | where AdditionalFieldsText contains "Behavior:Win32/CVE-2026-33825.Z!MTB"
+                    or AdditionalFieldsText contains "Exploit:Win32/DfndrPEBluHmr.BB"
+                    or AdditionalFieldsText contains "CVE-2026-33825"
+                    or AdditionalFieldsText contains "DfndrPEBluHmr"
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage7_MicrosoftDetectionName",
+                    StageDescription = "Microsoft Defender threat detection name associated with BlueHammer observed",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = AdditionalFieldsText,
+                    AdditionalContext = AdditionalFieldsText
             )
         | where isnotempty(DeviceId) and isnotempty(Timestamp)
         | extend StageTime = Timestamp
@@ -494,7 +526,6 @@ AllStages
     ReportRefs = make_set(strcat(tostring(StageTime), ":", tostring(ReportId)), 40)
   by DeviceId, DeviceName, WindowStart
 | where LastSeen between (WindowStart .. WindowStart + CorrelationWindow + CorrelationStep)
-| where StageCount >= 3
 | extend
     HasEicarTempExecutable = set_has_element(Stages, "Stage3a_EicarTempExecutable"),
     HasCloudSyncRoot = set_has_element(Stages, "Stage3b_CloudFilesSyncRoot"),
@@ -506,9 +537,11 @@ AllStages
     HasLsaBootKeyRead = set_has_element(Stages, "Stage5a_LsaBootKeyRegistryRead"),
     HasSamlibOrOffreg = set_has_element(Stages, "Stage5b_SamlibOrOffregLoad"),
     HasGuidService = set_has_element(Stages, "Stage6a_GuidNamedServiceInstalled"),
-    HasConhost = set_has_element(Stages, "Stage6b_NonstandardConhostSpawn")
+    HasConhost = set_has_element(Stages, "Stage6b_NonstandardConhostSpawn"),
+    HasMicrosoftDetectionName = set_has_element(Stages, "Stage7_MicrosoftDetectionName")
 | extend
     HasBlueHammerAnchor = HasDefenderDownload
+        or HasMicrosoftDetectionName
         or HasEicarTempExecutable
         or HasCloudSyncRoot
         or HasVssNearEicar
@@ -518,8 +551,10 @@ AllStages
         or HasLsaBootKeyRead
         or HasGuidService
 | where HasBlueHammerAnchor
+| where StageCount >= 3 or HasMicrosoftDetectionName
 | extend
     AlertSeverity = case(
+        HasMicrosoftDetectionName, "Critical",
         StageCount >= 6, "Critical",
         HasVssHiveRead and (HasGuidService or HasConhost), "Critical",
         HasLsaBootKeyRead and HasSamlibOrOffreg and (HasGuidService or HasConhost), "High",
@@ -527,7 +562,7 @@ AllStages
         "Medium"
     ),
     TTP = "T1003.002,T1134,T1543.003,T1552.002,T1557,T1620,T1105,T1546",
-    DetectionReason = "Possible BlueHammer attack chain: correlated Windows Update, Defender update, Cloud Files, VSS/SAM, offline registry, password-change, service, or token-execution telemetry within 30 minutes"
+    DetectionReason = "Possible BlueHammer attack chain: correlated Windows Update, Defender update, Cloud Files, VSS/SAM, offline registry, password-change, service, token-execution, or Microsoft detection-name telemetry within 30 minutes"
 | project-reorder
     AlertSeverity,
     DetectionReason,

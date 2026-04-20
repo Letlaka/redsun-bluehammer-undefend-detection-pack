@@ -4,9 +4,11 @@
 
 ## Purpose
 
-The RedSun package contains Microsoft Defender XDR Advanced Hunting queries for a multi-stage Windows privilege escalation pattern involving temporary payload staging, Cloud Files API behavior, named pipe artifacts, Defender-mediated file writes, reparse point or junction activity, oplock or VSS-related telemetry, and SYSTEM-level process creation.
+The RedSun package contains Microsoft Defender XDR Advanced Hunting queries for a multi-stage Windows privilege escalation pattern involving temporary payload staging, Cloud Files API behavior, named pipe artifacts, Defender-mediated file writes, reparse point or junction activity, oplock or VSS-related telemetry, Storage Tiers Management COM activation, Microsoft Defender detection-name telemetry, and SYSTEM-level process creation.
 
 The main query is intended to correlate multiple weak and medium-strength signals into a higher-confidence device-level alert. The standalone queries are intended for baseline review and stage-specific investigation.
+
+As of the research report dated April 19, 2026, RedSun did not have a public CVE assignment or public Microsoft patch identified. Treat this package as behavior-focused hunting content, not as proof that an endpoint is patched or unpatched.
 
 ## File Layout
 
@@ -20,6 +22,9 @@ The main query is intended to correlate multiple weak and medium-strength signal
 | `06_redsun_stage5_system_conhost_spawn.kql` | Standalone Stage 5: `conhost.exe` spawned as SYSTEM from a non-standard parent. |
 | `07_redsun_stage6_temp_reparse_pivot.kql` | Standalone Stage 6: temporary-path reparse point, symbolic link, or junction telemetry pointing toward System32. |
 | `08_redsun_stage7_batch_oplock_vss.kql` | Standalone Stage 7: batch oplock or VSS-related telemetry from a temporary-path process. |
+| `09_redsun_stage8_cloud_files_sync_root.kql` | Standalone Stage 8: Cloud Files sync root registration by a non-standard process. |
+| `10_redsun_stage9_storage_tiers_com_activation.kql` | Standalone Stage 9: Storage Tiers Management COM activation marker. |
+| `11_redsun_stage10_microsoft_detection_name.kql` | Standalone Stage 10: Microsoft Defender RedSun detection-name telemetry. |
 
 ## Main Query Behavior
 
@@ -30,8 +35,9 @@ Important behavior:
 - `Lookback` is set to `2h`.
 - `CorrelationWindow` is set to `60m`.
 - Stage output is normalized into common fields.
-- The query requires at least two distinct stages.
-- Severity becomes `Critical` when high-value execution and file-write stages are present together.
+- The query requires at least two distinct stages unless Microsoft Defender RedSun detection-name telemetry is present.
+- Severity becomes `Critical` when Microsoft detection-name telemetry is present, or when Storage Tiers COM activation is paired with System32 write or SYSTEM execution telemetry.
+- Severity becomes `High` when Cloud Files sync-root registration is paired with reparse or oplock telemetry.
 - The query produces stage sets, process sets, account sets, evidence sets, and report references for analyst pivoting.
 
 ## Stage Details
@@ -154,13 +160,55 @@ Limitations:
 - Oplock telemetry is sensor-dependent.
 - Treat standalone matches as investigative leads unless correlated with other stages.
 
+### Stage 8: Cloud Files Sync Root
+
+Detects sync root registration under `SyncRootManager` by an untrusted process.
+
+Primary table:
+
+- `DeviceRegistryEvents`
+
+Why it matters:
+
+- Public RedSun analysis highlights Cloud Files registration as an important setup signal.
+- This stage is stronger when paired with Stage 6 or Stage 7.
+
+Tuning notes:
+
+- Allowlist legitimate sync providers and their managed installation paths.
+
+### Stage 9: Storage Tiers COM Activation
+
+Detects Storage Tiers Management COM activation markers, including CLSID `{50d185b9-fff3-4656-92c7-e4018da4361d}`, from non-system or non-standard processes.
+
+Primary table:
+
+- `DeviceEvents`
+
+Limitations:
+
+- COM activation details are sensor-dependent and may only appear in `AdditionalFields`.
+- Legitimate storage administration tooling can require tuning.
+
+### Stage 10: Microsoft Detection Name
+
+Detects Microsoft Defender antivirus telemetry that contains RedSun-associated detection names such as `Exploit:Win32/DfndrPERedSun.BB`, `HackTool:Win64/RedSun.DA!MTB`, or `Exploit:Win32/Redsun.A`.
+
+Primary table:
+
+- `DeviceEvents`
+
+Why it matters:
+
+- This is high-signal vendor detection telemetry and can be useful even without other RedSun stages.
+
 ## Expected Analyst Workflow
 
-1. Run `02` through `08` individually to establish baseline behavior.
+1. Run `02` through `11` individually to establish baseline behavior.
 2. Review each result for legitimate software, account, path, and parent process patterns.
 3. Add tenant-specific exclusions only after confirming they are safe.
 4. Run `01_redsun_full_attack_chain.kql`.
-5. Investigate devices with Stage 4 or Stage 5 present.
+5. Investigate devices with Stage 4, Stage 5, Stage 9, or Stage 10 present.
 6. Pivot into device timeline and process tree using `ReportRefs`, `Processes`, and `Evidence`.
 
 ## False Positive Sources
@@ -174,6 +222,8 @@ Potential benign sources include:
 - Security tooling.
 - Remote support tools.
 - Developer tools that create junctions or symbolic links in temp paths.
+- Storage administration tools and management consoles.
+- Lab antivirus detections or validation simulations.
 
 ## Production Deployment Guidance
 
@@ -181,6 +231,9 @@ Use the main query as a hunting query first. For scheduled alerting, consider re
 
 - Stage 4 plus any other stage.
 - Stage 5 plus any other stage.
+- Stage 9 plus Stage 4 or Stage 5.
+- Stage 8 plus Stage 6 or Stage 7.
+- Stage 10 as a high-priority vendor-detection signal.
 - Stage 2 plus Stage 6 or Stage 7.
 - Three or more total stages.
 
