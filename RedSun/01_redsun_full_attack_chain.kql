@@ -274,10 +274,12 @@ let Stage9_StorageTiersComActivation =
         or AdditionalFieldsText contains "StorageTiers"
         or AdditionalFieldsText contains "LaunchTierManagementEng"
     | where InitiatingProcessFileName !in~ (TrustedStorageTiersComCallers)
-        or isempty(InitiatingProcessAccountSid)
-        or InitiatingProcessAccountSid != "S-1-5-18"
-        or IsTempPath(InitiatingProcessFolderPath)
-        or IsTempPath(InitiatingProcessCommandLine)
+        and (
+            isempty(InitiatingProcessAccountSid)
+            or InitiatingProcessAccountSid != "S-1-5-18"
+            or IsTempPath(InitiatingProcessFolderPath)
+            or IsTempPath(InitiatingProcessCommandLine)
+        )
     | project
         Timestamp,
         DeviceId,
