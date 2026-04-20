@@ -1,10 +1,6 @@
 # Changelog
 
-All notable repository changes should be recorded in this file.
-
-This project does not currently follow a formal release process. Use the `Unreleased` section for work in progress, and create dated sections when changes are published or tagged.
-
-## Unreleased
+## 2026-04-20
 
 ### Added
 
