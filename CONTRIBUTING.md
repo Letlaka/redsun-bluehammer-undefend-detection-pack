@@ -47,7 +47,7 @@ This repository uses a lightweight GitHub Flow model. The `main` branch is the p
 
 Use short-lived branches for all changes:
 
-- `fix/*` for KQL syntax, schema compatibility, or documentation corrections.
+- `fix/*` for KQL syntax and schema compatibility fixes.
 - `tune/*` for false-positive reduction, performance tuning, and threshold changes.
 - `docs/*` for documentation-only updates.
 - `feature/*` for new detection stages, packages, or larger enhancements.
@@ -61,7 +61,7 @@ Public branch and history expectations:
 - Merge changes into `main` through pull requests.
 - Delete short-lived branches after merge.
 - Use tags for public release points after the changelog is updated.
-- Prefer dated release tags such as `v2026.04.19` unless a semantic version is needed for downstream tooling.
+- Prefer dated release tags in the format `vYYYY.MM.DD` unless a semantic version is needed for downstream tooling.
 
 Recommended `main` branch protection:
 
