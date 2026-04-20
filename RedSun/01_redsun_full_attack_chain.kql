@@ -5,19 +5,28 @@
 // Purpose:
 //   Correlate RedSun-style precursor, file-system pivot, Defender write,
 //   and SYSTEM execution signals into one attack-chain alert.
-//   This is the main composite runner for the standalone 02-08 stage hunts.
+//   This is the main composite runner for the standalone 02-11 stage hunts.
 //
 // Notes:
 //   Standard Defender XDR telemetry may not expose every FSCTL or oplock
 //   signal. Stages 6 and 7 are opportunistic: they fire when those events are
-//   present in DeviceEvents/AdditionalFields, while the other stages carry the
-//   alert in tenants that only expose surrounding behavior.
+//   present in DeviceEvents/AdditionalFields. Stage 9 depends on COM activation
+//   details surfacing in DeviceEvents/AdditionalFields.
 
 let Lookback = 2h;
 let CorrelationWindow = 60m;
 let TargetFileName = "TieringEngineService.exe";
 let TargetFileNameLower = tolower(TargetFileName);
 let TargetSystem32Path = strcat(@"c:\windows\system32\", TargetFileNameLower);
+let StorageTiersClsid = "50d185b9-fff3-4656-92c7-e4018da4361d";
+let TrustedSyncProviders = dynamic([
+    "OneDrive.exe", "GoogleDriveFS.exe", "googledrivesync.exe", "Dropbox.exe",
+    "DropboxUpdate.exe", "FileCoAuth.exe", "SharePoint.exe", "Box.exe", "BoxDrive.exe"
+]);
+let TrustedStorageTiersComCallers = dynamic([
+    "svchost.exe", "services.exe", "dllhost.exe", "TiWorker.exe",
+    "TrustedInstaller.exe", "ServerManager.exe", "mmc.exe"
+]);
 let IsTempPath = (Path: string)
 {
     tolower(Path) contains @"\appdata\local\temp\"
@@ -234,6 +243,84 @@ let Stage7_BatchOplockVss =
         Evidence = AdditionalFieldsText,
         AdditionalContext = AdditionalFieldsText;
 
+let Stage8_CloudFilesSyncRoot =
+    DeviceRegistryEvents
+    | where Timestamp >= ago(Lookback)
+    | where ActionType in~ ("RegistryKeyCreated", "RegistryValueSet")
+    | where RegistryKey contains @"\Explorer\SyncRootManager\"
+        or RegistryKey contains @"\SyncRootManager\"
+    | where InitiatingProcessFileName !in~ (TrustedSyncProviders)
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage8_CloudFilesSyncRoot",
+        StageDescription = "Cloud Files sync root registered by a non-standard process",
+        ProcessName = InitiatingProcessFileName,
+        ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        ProcessCommandLine = InitiatingProcessCommandLine,
+        AccountName = InitiatingProcessAccountName,
+        AccountSid = InitiatingProcessAccountSid,
+        Evidence = RegistryKey,
+        AdditionalContext = strcat("RegistryValueName=", RegistryValueName, "; RegistryValueData=", RegistryValueData);
+
+let Stage9_StorageTiersComActivation =
+    DeviceEvents
+    | where Timestamp >= ago(Lookback)
+    | extend AdditionalFieldsText = tostring(AdditionalFields)
+    | where AdditionalFieldsText contains StorageTiersClsid
+        or AdditionalFieldsText contains "Storage Tiers"
+        or AdditionalFieldsText contains "StorageTiers"
+        or AdditionalFieldsText contains "LaunchTierManagementEng"
+    | where InitiatingProcessFileName !in~ (TrustedStorageTiersComCallers)
+        and (
+            isempty(InitiatingProcessAccountSid)
+            or InitiatingProcessAccountSid != "S-1-5-18"
+            or IsTempPath(InitiatingProcessFolderPath)
+            or IsTempPath(InitiatingProcessCommandLine)
+        )
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage9_StorageTiersComActivation",
+        StageDescription = "Storage Tiers Management COM activation marker observed from a non-system or non-standard process",
+        ProcessName = InitiatingProcessFileName,
+        ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        ProcessCommandLine = InitiatingProcessCommandLine,
+        AccountName = InitiatingProcessAccountName,
+        AccountSid = InitiatingProcessAccountSid,
+        Evidence = AdditionalFieldsText,
+        AdditionalContext = AdditionalFieldsText;
+
+let Stage10_MicrosoftDetectionName =
+    DeviceEvents
+    | where Timestamp >= ago(Lookback)
+    | extend AdditionalFieldsText = tostring(AdditionalFields)
+    | where ActionType == "AntivirusDetection"
+        or ActionType contains "Antivirus"
+        or AdditionalFieldsText contains "ThreatName"
+    | where AdditionalFieldsText contains "DfndrPERedSun"
+        or AdditionalFieldsText contains "HackTool:Win64/RedSun"
+        or AdditionalFieldsText contains "Exploit:Win32/Redsun"
+        or AdditionalFieldsText contains "Redsun.A"
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage10_MicrosoftDetectionName",
+        StageDescription = "Microsoft Defender threat detection name associated with RedSun observed",
+        ProcessName = InitiatingProcessFileName,
+        ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        ProcessCommandLine = InitiatingProcessCommandLine,
+        AccountName = InitiatingProcessAccountName,
+        AccountSid = InitiatingProcessAccountSid,
+        Evidence = AdditionalFieldsText,
+        AdditionalContext = AdditionalFieldsText;
+
 let AllStages =
     materialize(
     union
@@ -243,7 +330,10 @@ let AllStages =
         (Stage4_System32TieringWrite),
         (Stage5_SystemConhostSpawn),
         (Stage6_TempDirReparsePivot),
-        (Stage7_BatchOplockVss)
+        (Stage7_BatchOplockVss),
+        (Stage8_CloudFilesSyncRoot),
+        (Stage9_StorageTiersComActivation),
+        (Stage10_MicrosoftDetectionName)
     | where isnotempty(DeviceId) and isnotempty(Timestamp)
     | extend StageTime = Timestamp
     );
@@ -252,8 +342,8 @@ AllStages
 | join kind=inner (AllStages) on $left.AnchorDeviceId == $right.DeviceId
 | where StageTime between (AnchorTime .. AnchorTime + CorrelationWindow)
 | summarize
-    Stages = make_set(Stage, 10),
-    StageDetails = make_set(strcat(Stage, ": ", StageDescription), 20),
+    Stages = make_set(Stage, 14),
+    StageDetails = make_set(strcat(Stage, ": ", StageDescription), 24),
     StageCount = dcount(Stage),
     EventCount = count(),
     FirstSeen = min(StageTime),
@@ -266,23 +356,34 @@ AllStages
     AdditionalContexts = make_set(AdditionalContext, 20),
     ReportRefs = make_set(strcat(tostring(StageTime), ":", tostring(ReportId)), 50)
     by DeviceId, DeviceName, WindowStart = AnchorTime
-| where StageCount >= 2
 | summarize arg_max(StageCount, *) by DeviceId, WindowBucket = bin(FirstSeen, 10m)
 | extend
     HasSystem32TieringWrite = set_has_element(Stages, "Stage4_System32TieringWrite"),
-    HasSystemConhostSpawn = set_has_element(Stages, "Stage5_SystemConhostSpawn")
+    HasSystemConhostSpawn = set_has_element(Stages, "Stage5_SystemConhostSpawn"),
+    HasTempDirReparsePivot = set_has_element(Stages, "Stage6_TempDirReparsePivot"),
+    HasBatchOplockVss = set_has_element(Stages, "Stage7_BatchOplockVss"),
+    HasCloudFilesSyncRoot = set_has_element(Stages, "Stage8_CloudFilesSyncRoot"),
+    HasStorageTiersComActivation = set_has_element(Stages, "Stage9_StorageTiersComActivation"),
+    HasMicrosoftDetectionName = set_has_element(Stages, "Stage10_MicrosoftDetectionName")
+| where StageCount >= 2 or HasMicrosoftDetectionName
 | extend
     AlertSeverity = case(
+                    HasMicrosoftDetectionName,
+                    "Critical",
+                    HasStorageTiersComActivation and (HasSystem32TieringWrite or HasSystemConhostSpawn),
+                    "Critical",
                     StageCount >= 5,
                     "Critical",
                     HasSystem32TieringWrite and HasSystemConhostSpawn,
                     "Critical",
+                    HasCloudFilesSyncRoot and (HasTempDirReparsePivot or HasBatchOplockVss),
+                    "High",
                     StageCount >= 3,
                     "High",
                     "Medium"
                 ),
     TTP = "T1068,T1574.010,T1055,T1543.003",
-    DetectionReason = "Possible RedSun attack chain: correlated Cloud Files, reparse/oplock, Defender write, or SYSTEM execution telemetry within 60 minutes"
+    DetectionReason = "Possible RedSun attack chain: correlated Cloud Files, Storage Tiers COM, reparse/oplock, Defender write, SYSTEM execution, or Microsoft detection-name telemetry within 60 minutes"
 | project-reorder
     AlertSeverity,
     DetectionReason,

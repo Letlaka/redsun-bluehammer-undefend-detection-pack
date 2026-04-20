@@ -8,6 +8,8 @@ The UnDefend package contains Microsoft Defender XDR Advanced Hunting queries fo
 
 The package is intended to identify suspicious behavior around Defender update and service surfaces. It does not prove tampering by itself. Analysts must correlate results with process lineage, user context, change-control history, software inventory, and Defender device timeline evidence.
 
+As of the research report dated April 19, 2026, UnDefend did not have a public CVE assignment or public Microsoft patch identified. This package focuses on Defender degradation behavior, especially suspicious definition-file access followed by service or update failure effects.
+
 ## File Layout
 
 | File | Role |
@@ -133,7 +135,7 @@ Tuning notes:
 
 ### Stage 6: Defender Update or Engine Failure
 
-Detects Defender update, signature, service, or engine failure strings and action types.
+Detects Defender update, signature, service, or engine failure strings and action types. The stage also matches common Event ID 2001 shapes only when the same telemetry contains Defender or update context.
 
 Primary table:
 
@@ -147,6 +149,7 @@ Tuning notes:
 
 - Defender update failures can occur for benign reasons such as network issues, proxy problems, disk issues, or service health problems.
 - Treat this stage as stronger when paired with Stage 2 or Stage 3.
+- Do not tune generic Event ID 2001 matches without confirming the Defender/update context, because unrelated Windows events can reuse the same numeric ID.
 
 ### Stage 7: MRT Directory Access
 
@@ -209,4 +212,5 @@ For every main-query result, review:
 - File and registry details in `Evidence`.
 - Service control activity for `WinDefend`.
 - Defender health, engine version, platform version, and signature update history.
+- Dashboard-reported Defender health against on-disk definition timestamps and versions, because stale local definitions can matter even when management health looks normal.
 - Any recent software deployment or endpoint management job.

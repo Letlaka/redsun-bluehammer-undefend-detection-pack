@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+
+// Purpose:
+//   Standalone RedSun Stage 10 hunt from 01_redsun_full_attack_chain.kql.
+//   Finds Microsoft Defender threat detection names associated with RedSun.
+
+let Lookback = 2h;
+let NormalizePath = (FolderPath:string, FileName:string) {
+    iff(
+        isnotempty(FileName) and tolower(FolderPath) endswith strcat(@"\", tolower(FileName)),
+        FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+DeviceEvents
+| where Timestamp >= ago(Lookback)
+| extend AdditionalFieldsText = tostring(AdditionalFields)
+| where ActionType == "AntivirusDetection"
+    or ActionType contains "Antivirus"
+    or AdditionalFieldsText contains "ThreatName"
+| where AdditionalFieldsText contains "DfndrPERedSun"
+    or AdditionalFieldsText contains "HackTool:Win64/RedSun"
+    or AdditionalFieldsText contains "Exploit:Win32/Redsun"
+    or AdditionalFieldsText contains "Redsun.A"
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage10_MicrosoftDetectionName",
+    StageDescription = "Microsoft Defender threat detection name associated with RedSun observed",
+    ProcessName = InitiatingProcessFileName,
+    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    AccountName = InitiatingProcessAccountName,
+    AccountSid = InitiatingProcessAccountSid,
+    Evidence = AdditionalFieldsText,
+    AdditionalContext = AdditionalFieldsText
+| order by Timestamp desc

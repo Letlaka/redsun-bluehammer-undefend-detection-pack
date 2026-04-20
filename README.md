@@ -8,14 +8,16 @@ This repository, `redsun-bluehammer-undefend-detection-pack`, contains Microsoft
 
 The content is designed for security research, detection engineering, lab validation, and controlled hunting workflows. It is not a drop-in production detection set. Each environment has different Defender XDR sensor coverage, event volumes, endpoint baselines, software inventory, and legitimate administrative behavior. You must validate both syntax and detection quality in your own tenant before enabling these queries as scheduled custom detections.
 
+Research reviewed through April 19, 2026 maps BlueHammer to CVE-2026-33825 and public reporting of a Microsoft Defender Antimalware Platform fix at version 4.18.26050.3011. The same report found no public CVE assignment or public Microsoft patch for RedSun or UnDefend as of that date. This repository detects behaviors and Defender telemetry; it does not determine patch compliance by itself.
+
 ## Repository Layout
 
 Each detection family is isolated in its own folder. Inside each folder, numbering starts at `01` and is sequential.
 
 | Folder | Main Query | Standalone Queries | Purpose |
 | --- | --- | --- | --- |
-| `RedSun` | `01_redsun_full_attack_chain.kql` | `02` through `08` | Correlates Cloud Files, temporary payload staging, reparse or oplock telemetry, Defender-origin file writes, and SYSTEM execution artifacts. |
-| `BlueHammer` | `01_bluehammer_full_attack_chain.kql` | `02` through `16` | Correlates Defender update abuse, Cloud Files callbacks, VSS/SAM access, offline registry activity, password changes, service creation, and token/process behavior. |
+| `RedSun` | `01_redsun_full_attack_chain.kql` | `02` through `11` | Correlates Cloud Files, temporary payload staging, reparse or oplock telemetry, Storage Tiers COM activation, Defender-origin file writes, SYSTEM execution artifacts, and Microsoft detection names. |
+| `BlueHammer` | `01_bluehammer_full_attack_chain.kql` | `02` through `17` | Correlates Defender update abuse, Cloud Files callbacks, VSS/SAM access, offline registry activity, password changes, service creation, token/process behavior, and Microsoft detection names. |
 | `UnDefend` | `01_undefend_full_attack_chain.kql` | `02` through `08` | Correlates Defender registry reconnaissance, signature file access, update directory monitoring, WinDefend service monitoring, update or engine failure, and MRT directory access. |
 
 ## Query Design Pattern
@@ -40,7 +42,7 @@ Commonly used tables include:
 | `DeviceImageLoadEvents` | DLL loads such as `cldapi.dll`, `wuapi.dll`, `samlib.dll`, and `offreg.dll`. |
 | `DeviceRegistryEvents` | Registry key and value access, Cloud Files sync root registration, Defender path reconnaissance. |
 | `DeviceNetworkEvents` | Defender update package download signals and CDN URL access. |
-| `DeviceEvents` | Miscellaneous endpoint telemetry including named pipes, service events, antivirus detections, service changes, FSCTL-like details, and sensor-dependent additional fields. |
+| `DeviceEvents` | Miscellaneous endpoint telemetry including named pipes, service events, antivirus detections, Microsoft detection names, service changes, FSCTL-like details, and sensor-dependent additional fields. |
 
 Telemetry is not uniform across all tenants. Some low-level primitives, especially raw oplock, reparse point, object manager symbolic link, and service query telemetry, may not appear as explicit events. The queries therefore include opportunistic matching against `ActionType` and `AdditionalFields` where Defender XDR exposes those details.
 
@@ -56,6 +58,8 @@ Before production use, validate each package in this order:
 6. Compare full-chain results against standalone results and confirm that correlated stages make operational sense.
 7. Export results to CSV and review process paths, command lines, accounts, devices, and timestamps.
 8. Only after tuning should you convert a query into a scheduled custom detection rule.
+
+Repository CI also runs `.github/scripts/validate_repository.py` to confirm KQL headers, delimiter balance, contiguous numbering, standalone-to-full-chain stage alignment, and README coverage for every package KQL file.
 
 ## Production Deployment Guidance
 

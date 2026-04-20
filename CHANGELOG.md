@@ -8,6 +8,9 @@ This project does not currently follow a formal release process. Use the `Unrele
 
 ### Added
 
+- RedSun standalone stages for Cloud Files sync-root registration, Storage Tiers COM activation markers, and Microsoft Defender RedSun detection-name telemetry.
+- BlueHammer standalone stage for Microsoft Defender BlueHammer detection-name telemetry.
+- Repository validation checks for standalone-to-full-chain stage alignment and package README KQL coverage.
 - Repository-level README covering project purpose, layout, Defender XDR table dependencies, validation workflow, production deployment guidance, performance notes, and maintenance expectations.
 - Folder-specific READMEs for `RedSun`, `BlueHammer`, and `UnDefend`.
 - Repository governance and support documentation:
@@ -27,6 +30,10 @@ This project does not currently follow a formal release process. Use the `Unrele
 
 ### Changed
 
+- Updated RedSun full-chain correlation to include the new Cloud Files, Storage Tiers COM, and Microsoft detection-name stages with severity handling for high-signal combinations.
+- Updated BlueHammer Stage 5c to also flag the public password marker and updated the full-chain query so Microsoft detection-name telemetry can stand alone as a critical signal.
+- Updated UnDefend Stage 6 to include Defender/update-context Event ID 2001 matching without treating generic Event ID 2001 as sufficient.
+- Updated package and root README guidance for CVE-2026-33825, RedSun and UnDefend public-CVE status as of April 19, 2026, new false-positive sources, and health-vs-on-disk validation guidance.
 - Replaced the license placeholder with Apache License 2.0.
 - Added SPDX license, copyright, and AI-generated review-warning headers to all KQL files.
 - Detection folders now use sequential file numbering starting at `01`.
@@ -35,6 +42,7 @@ This project does not currently follow a formal release process. Use the `Unrele
 
 ### Validation
 
+- Added CI validation coverage for stage alignment and README KQL basename coverage.
 - Confirmed each detection folder has contiguous numbering from `01`.
 - Confirmed standalone stage queries match their corresponding full-chain stage blocks.
 - Confirmed static syntax checks passed for KQL files.

@@ -15,6 +15,7 @@ REQUIRED_KQL_HEADER = (
     "// Copyright 2026 Letlaka",
     "// AI-generated detection content. Review, test, tune, and verify before production use.",
 )
+STAGE_PATTERN = re.compile(r'\bStage\s*=\s*"([^"]+)"')
 
 
 def add_error(errors: list[str], path: Path, message: str) -> None:
@@ -124,6 +125,49 @@ def validate_kql_file(path: Path, errors: list[str]) -> None:
     validate_balanced_delimiters(path, text, errors)
 
 
+def extract_stage_names(path: Path) -> set[str]:
+    text = path.read_text(encoding="utf-8")
+    return set(STAGE_PATTERN.findall(text))
+
+
+def validate_readme_coverage(readme: Path, kql_files: list[Path], errors: list[str]) -> None:
+    if not readme.is_file():
+        return
+
+    readme_text = readme.read_text(encoding="utf-8")
+    for file_path in kql_files:
+        if file_path.stem not in readme_text:
+            add_error(errors, readme, f"missing KQL basename `{file_path.stem}`")
+
+
+def validate_stage_alignment(full_chain_file: Path, standalone_files: list[Path], errors: list[str]) -> None:
+    full_chain_stages = extract_stage_names(full_chain_file)
+    if not full_chain_stages:
+        add_error(errors, full_chain_file, "full-chain query does not define any stage names")
+        return
+
+    standalone_stage_paths: dict[str, list[Path]] = {}
+    for file_path in standalone_files:
+        stages = extract_stage_names(file_path)
+        if len(stages) != 1:
+            add_error(errors, file_path, f"standalone query must define exactly one stage; found {sorted(stages)}")
+            continue
+        stage = next(iter(stages))
+        standalone_stage_paths.setdefault(stage, []).append(file_path)
+
+    for stage, paths in standalone_stage_paths.items():
+        if len(paths) > 1:
+            path_list = ", ".join(str(path.relative_to(ROOT)) for path in paths)
+            add_error(errors, paths[0], f"stage `{stage}` is duplicated across standalone queries: {path_list}")
+
+    standalone_stages = set(standalone_stage_paths)
+    for stage in sorted(standalone_stages - full_chain_stages):
+        add_error(errors, standalone_stage_paths[stage][0], f"stage `{stage}` is missing from full-chain query")
+
+    for stage in sorted(full_chain_stages - standalone_stages):
+        add_error(errors, full_chain_file, f"full-chain stage `{stage}` has no standalone query")
+
+
 def validate_detection_dir(directory: Path, errors: list[str]) -> None:
     if not directory.is_dir():
         add_error(errors, directory, "missing detection directory")
@@ -158,6 +202,9 @@ def validate_detection_dir(directory: Path, errors: list[str]) -> None:
     first_file = kql_files[0].name
     if not re.fullmatch(r"01_.+_full_attack_chain\.kql", first_file):
         add_error(errors, kql_files[0], "first query must be the full attack-chain query")
+
+    validate_stage_alignment(kql_files[0], kql_files[1:], errors)
+    validate_readme_coverage(readme, kql_files, errors)
 
 
 def main() -> int:
