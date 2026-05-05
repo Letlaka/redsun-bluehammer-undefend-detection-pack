@@ -73,7 +73,7 @@ let Stage1_ObservedToolingExecution =
         "StandardMode"
     )
     | join kind=leftouter (NearbyDetectionContext) on DeviceId
-    | where isnull(ContextTime) or Timestamp between (ContextTime - 30m .. ContextTime + 30m)
+    | extend IsNearbyContext = isnotnull(ContextTime) and Timestamp between (ContextTime - 30m .. ContextTime + 30m)
     | summarize
         Timestamp = min(Timestamp),
         DeviceName = any(DeviceName),
@@ -84,8 +84,8 @@ let Stage1_ObservedToolingExecution =
         ParentFileName = any(InitiatingProcessFileName),
         ParentCommandLine = any(InitiatingProcessCommandLine),
         ToolingModes = make_set(ToolingMode, 5),
-        NearbyContextTypes = make_set(ContextType, 5),
-        NearbyContextEvidence = make_set(ContextEvidence, 5)
+        NearbyContextTypes = make_set_if(ContextType, IsNearbyContext, 5),
+        NearbyContextEvidence = make_set_if(ContextEvidence, IsNearbyContext, 5)
       by DeviceId, ProcessName = FileName, ProcessPath
     | project
         Timestamp,
