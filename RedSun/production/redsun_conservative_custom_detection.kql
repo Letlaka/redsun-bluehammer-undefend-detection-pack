@@ -1,0 +1,423 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+// DetectionMetadata:
+//   Family: RedSun
+//   QueryType: Production
+//   Severity: High
+//   Confidence: High
+//   DataSources: DeviceEvents, DeviceFileEvents, DeviceImageLoadEvents, DeviceProcessEvents, DeviceRegistryEvents
+//   ATTACK: T1068,T1574.010,T1055
+//   SourceRefs: SOURCES.md#redsun
+//   ProductionReady: Yes
+//   LastVerified: 2026-05-05
+
+// Purpose:
+//   Conservative scheduled-detection candidate derived from the RedSun
+//   hunting query. This variant keeps only the stronger production-worthy
+//   combinations documented in the upgrade plan.
+//
+// Notes:
+//   Standard Defender XDR telemetry may not expose every FSCTL or oplock
+//   signal. Stages 6 and 7 are opportunistic: they fire when those events are
+//   present in DeviceEvents/AdditionalFields. Stage 9 depends on COM activation
+//   details surfacing in DeviceEvents/AdditionalFields.
+
+let Lookback = 2h;
+let CorrelationWindow = 60m;
+let TargetFileName = "TieringEngineService.exe";
+let TargetFileNameLower = tolower(TargetFileName);
+let TargetSystem32Path = strcat(@"c:\windows\system32\", TargetFileNameLower);
+let StorageTiersClsid = "50d185b9-fff3-4656-92c7-e4018da4361d";
+let TrustedSyncProviders = dynamic([
+    "OneDrive.exe", "GoogleDriveFS.exe", "googledrivesync.exe", "Dropbox.exe",
+    "DropboxUpdate.exe", "FileCoAuth.exe", "SharePoint.exe", "Box.exe", "BoxDrive.exe"
+]);
+let TrustedStorageTiersComCallers = dynamic([
+    "svchost.exe", "services.exe", "dllhost.exe", "TiWorker.exe",
+    "TrustedInstaller.exe", "ServerManager.exe", "mmc.exe"
+]);
+let IsTempPath = (Path: string)
+{
+    tolower(Path) contains @"\appdata\local\temp\"
+    or tolower(Path) contains @"\windows\temp\"
+    or tolower(Path) startswith @"c:\temp\"
+    or tolower(Path) contains @"\temp\"
+};
+let NormalizePath = (FolderPath: string, FileName: string)
+{
+    iff(
+    isnotempty(FileName) and tolower(FolderPath) endswith strcat(@"\", tolower(FileName)),
+    FolderPath,
+    strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+)
+};
+
+let Stage1_TempTargetDrop =
+    DeviceFileEvents
+    | where Timestamp >= ago(Lookback)
+    | where ActionType in~ ("FileCreated", "FileModified", "FileRenamed")
+    | where FileName =~ TargetFileName
+    | where IsTempPath(FolderPath) or IsTempPath(PreviousFolderPath)
+    | where InitiatingProcessFileName !in~ ("MsMpEng.exe", "SenseIR.exe", "SecurityHealthService.exe")
+    | extend FilePath = NormalizePath(FolderPath, FileName)
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage1_TempTargetDrop",
+        StageDescription = "TieringEngineService.exe created, modified, or renamed in a temporary path",
+        ProcessName = InitiatingProcessFileName,
+        ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        ProcessCommandLine = InitiatingProcessCommandLine,
+        AccountName = InitiatingProcessAccountName,
+        AccountSid = InitiatingProcessAccountSid,
+        Evidence = FilePath,
+        AdditionalContext = tostring(AdditionalFields);
+
+let Stage2_CloudFilterLoad =
+    DeviceImageLoadEvents
+    | where Timestamp >= ago(Lookback)
+    | where FileName =~ "cldapi.dll"
+    | where IsTempPath(InitiatingProcessFolderPath) or IsTempPath(InitiatingProcessCommandLine)
+    | where InitiatingProcessFileName !in~ (
+        "OneDrive.exe",
+        "OneDriveSetup.exe",
+        "Dropbox.exe",
+        "DropboxUpdate.exe",
+        "Box.exe",
+        "BoxDrive.exe",
+        "GoogleDriveFS.exe",
+        "GoogleDriveSync.exe",
+        "FileCoAuth.exe"
+        )
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage2_CloudFilterLoad",
+        StageDescription = "cldapi.dll loaded by a process running from a temporary path",
+        ProcessName = InitiatingProcessFileName,
+        ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        ProcessCommandLine = InitiatingProcessCommandLine,
+        AccountName = InitiatingProcessAccountName,
+        AccountSid = InitiatingProcessAccountSid,
+        Evidence = NormalizePath(FolderPath, FileName),
+        AdditionalContext = strcat("LoadedImage=", NormalizePath(FolderPath, FileName));
+
+let Stage3_RedsunPipeArtifact =
+    DeviceEvents
+    | where Timestamp >= ago(Lookback)
+    | extend AdditionalFieldsText = tostring(AdditionalFields)
+    | where AdditionalFieldsText has "REDSUN"
+    | where ActionType has "NamedPipe"
+        or AdditionalFieldsText contains @"\pipe\"
+        or AdditionalFieldsText has "PipeName"
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage3_RedsunPipeArtifact",
+        StageDescription = "REDSUN named-pipe or pipe-name artifact observed",
+        ProcessName = InitiatingProcessFileName,
+        ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        ProcessCommandLine = InitiatingProcessCommandLine,
+        AccountName = InitiatingProcessAccountName,
+        AccountSid = InitiatingProcessAccountSid,
+        Evidence = AdditionalFieldsText,
+        AdditionalContext = AdditionalFieldsText;
+
+let Stage4_System32TieringWrite =
+    DeviceFileEvents
+    | where Timestamp >= ago(Lookback)
+    | where ActionType in~ ("FileCreated", "FileModified", "FileRenamed")
+    | where FileName =~ TargetFileName
+    | extend
+        FilePath = NormalizePath(FolderPath, FileName),
+        FilePathLower = tolower(NormalizePath(FolderPath, FileName)),
+        FolderPathLower = tolower(FolderPath)
+    | where FilePathLower == TargetSystem32Path
+        or (FolderPathLower == @"c:\windows\system32" and FileName =~ TargetFileName)
+    | extend WriterClass = case(
+                           InitiatingProcessFileName in~ ("MsMpEng.exe", "MpCmdRun.exe", "NisSrv.exe"),
+                           "DefenderWriter",
+                           InitiatingProcessAccountSid == "S-1-5-18" or InitiatingProcessAccountName =~ "SYSTEM",
+                           "SystemWriter",
+                           "NonSystemWriter"
+                       )
+    | where WriterClass in ("DefenderWriter", "NonSystemWriter")
+        or InitiatingProcessFileName !in~ (
+        "TrustedInstaller.exe",
+        "wusa.exe",
+        "msiexec.exe",
+        "svchost.exe",
+        "tiworker.exe",
+        "dism.exe"
+        )
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage4_System32TieringWrite",
+        StageDescription = "TieringEngineService.exe written in System32 by Defender or an unusual writer",
+        ProcessName = InitiatingProcessFileName,
+        ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        ProcessCommandLine = InitiatingProcessCommandLine,
+        AccountName = InitiatingProcessAccountName,
+        AccountSid = InitiatingProcessAccountSid,
+        Evidence = FilePath,
+        AdditionalContext = strcat("WriterClass=", WriterClass, "; ActionType=", ActionType, "; Path=", FilePath);
+
+let Stage5_SystemConhostSpawn =
+    DeviceProcessEvents
+    | where Timestamp >= ago(Lookback)
+    | where FileName =~ "conhost.exe"
+    | where AccountSid == "S-1-5-18" or AccountName =~ "SYSTEM"
+    | where InitiatingProcessFileName !in~ ("csrss.exe", "wininit.exe", "svchost.exe", "services.exe")
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage5_SystemConhostSpawn",
+        StageDescription = "conhost.exe spawned as SYSTEM from a non-standard parent",
+        ProcessName = FileName,
+        ProcessPath = NormalizePath(FolderPath, FileName),
+        ProcessCommandLine,
+        AccountName,
+        AccountSid,
+        Evidence = ProcessCommandLine,
+        AdditionalContext = strcat("Parent=", InitiatingProcessFileName, "; ParentCommandLine=", InitiatingProcessCommandLine);
+
+let Stage6_TempDirReparsePivot =
+    DeviceEvents
+    | where Timestamp >= ago(Lookback)
+    | extend
+        AdditionalFieldsText = tostring(AdditionalFields),
+        EventPath = NormalizePath(FolderPath, FileName)
+    | where ActionType in~ ("DirectoryJunctionCreated", "SymbolicLinkCreated", "DeviceIoControl")
+        or AdditionalFieldsText has_any ("FSCTL_SET_REPARSE_POINT", "IO_REPARSE_TAG_MOUNT_POINT", "Junction", "Reparse")
+    | where IsTempPath(EventPath)
+        or IsTempPath(InitiatingProcessFolderPath)
+        or IsTempPath(AdditionalFieldsText)
+    | where AdditionalFieldsText contains @"windows\system32"
+        or tolower(EventPath) contains @"\windows\system32"
+        or AdditionalFieldsText contains TargetFileName
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage6_TempDirReparsePivot",
+        StageDescription = "Temporary-path reparse point or junction activity pointing toward System32",
+        ProcessName = InitiatingProcessFileName,
+        ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        ProcessCommandLine = InitiatingProcessCommandLine,
+        AccountName = InitiatingProcessAccountName,
+        AccountSid = InitiatingProcessAccountSid,
+        Evidence = EventPath,
+        AdditionalContext = AdditionalFieldsText;
+
+let Stage7_BatchOplockVss =
+    DeviceEvents
+    | where Timestamp >= ago(Lookback)
+    | extend AdditionalFieldsText = tostring(AdditionalFields)
+    | where ActionType =~ "DeviceIoControl"
+        or AdditionalFieldsText has_any ("FSCTL_REQUEST_BATCH_OPLOCK", "REQUEST_BATCH_OPLOCK")
+    | where AdditionalFieldsText has_any ("FSCTL_REQUEST_BATCH_OPLOCK", "REQUEST_BATCH_OPLOCK", "BatchOplock")
+    | where IsTempPath(InitiatingProcessFolderPath) or IsTempPath(InitiatingProcessCommandLine)
+    | where AdditionalFieldsText has_any (
+        "HarddiskVolumeShadowCopy",
+        "GLOBALROOT",
+        "VSS",
+        "mpavbase",
+        "mpengine"
+        )
+        or AdditionalFieldsText contains TargetFileName
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage7_BatchOplockVss",
+        StageDescription = "Batch oplock request from temporary-path process against VSS or Defender-related target",
+        ProcessName = InitiatingProcessFileName,
+        ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        ProcessCommandLine = InitiatingProcessCommandLine,
+        AccountName = InitiatingProcessAccountName,
+        AccountSid = InitiatingProcessAccountSid,
+        Evidence = AdditionalFieldsText,
+        AdditionalContext = AdditionalFieldsText;
+
+let Stage8_CloudFilesSyncRoot =
+    DeviceRegistryEvents
+    | where Timestamp >= ago(Lookback)
+    | where ActionType in~ ("RegistryKeyCreated", "RegistryValueSet")
+    | where RegistryKey contains @"\Explorer\SyncRootManager\"
+        or RegistryKey contains @"\SyncRootManager\"
+    | where InitiatingProcessFileName !in~ (TrustedSyncProviders)
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage8_CloudFilesSyncRoot",
+        StageDescription = "Cloud Files sync root registered by a non-standard process",
+        ProcessName = InitiatingProcessFileName,
+        ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        ProcessCommandLine = InitiatingProcessCommandLine,
+        AccountName = InitiatingProcessAccountName,
+        AccountSid = InitiatingProcessAccountSid,
+        Evidence = RegistryKey,
+        AdditionalContext = strcat("RegistryValueName=", RegistryValueName, "; RegistryValueData=", RegistryValueData);
+
+let Stage9_StorageTiersComActivation =
+    DeviceEvents
+    | where Timestamp >= ago(Lookback)
+    | extend AdditionalFieldsText = tostring(AdditionalFields)
+    | where AdditionalFieldsText contains StorageTiersClsid
+        or AdditionalFieldsText contains "Storage Tiers"
+        or AdditionalFieldsText contains "StorageTiers"
+        or AdditionalFieldsText contains "LaunchTierManagementEng"
+    | where InitiatingProcessFileName !in~ (TrustedStorageTiersComCallers)
+        and (
+            isempty(InitiatingProcessAccountSid)
+            or InitiatingProcessAccountSid != "S-1-5-18"
+            or IsTempPath(InitiatingProcessFolderPath)
+            or IsTempPath(InitiatingProcessCommandLine)
+        )
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage9_StorageTiersComActivation",
+        StageDescription = "Storage Tiers Management COM activation marker observed from a non-system or non-standard process",
+        ProcessName = InitiatingProcessFileName,
+        ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        ProcessCommandLine = InitiatingProcessCommandLine,
+        AccountName = InitiatingProcessAccountName,
+        AccountSid = InitiatingProcessAccountSid,
+        Evidence = AdditionalFieldsText,
+        AdditionalContext = AdditionalFieldsText;
+
+let Stage10_MicrosoftDetectionName =
+    DeviceEvents
+    | where Timestamp >= ago(Lookback)
+    | extend AdditionalFieldsText = tostring(AdditionalFields)
+    | where ActionType == "AntivirusDetection"
+        or ActionType contains "Antivirus"
+        or AdditionalFieldsText contains "ThreatName"
+    | where AdditionalFieldsText contains "DfndrPERedSun"
+        or AdditionalFieldsText contains "HackTool:Win64/RedSun"
+        or AdditionalFieldsText contains "Exploit:Win32/Redsun"
+        or AdditionalFieldsText contains "Redsun.A"
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage10_MicrosoftDetectionName",
+        StageDescription = "Microsoft Defender threat detection name associated with RedSun observed",
+        ProcessName = InitiatingProcessFileName,
+        ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        ProcessCommandLine = InitiatingProcessCommandLine,
+        AccountName = InitiatingProcessAccountName,
+        AccountSid = InitiatingProcessAccountSid,
+        Evidence = AdditionalFieldsText,
+        AdditionalContext = AdditionalFieldsText;
+
+let AllStages =
+    materialize(
+    union
+        (Stage1_TempTargetDrop),
+        (Stage2_CloudFilterLoad),
+        (Stage3_RedsunPipeArtifact),
+        (Stage4_System32TieringWrite),
+        (Stage5_SystemConhostSpawn),
+        (Stage6_TempDirReparsePivot),
+        (Stage7_BatchOplockVss),
+        (Stage8_CloudFilesSyncRoot),
+        (Stage9_StorageTiersComActivation),
+        (Stage10_MicrosoftDetectionName)
+    | where isnotempty(DeviceId) and isnotempty(Timestamp)
+    | extend StageTime = Timestamp
+    );
+AllStages
+| project AnchorDeviceId = DeviceId, AnchorTime = StageTime
+| join kind=inner (AllStages) on $left.AnchorDeviceId == $right.DeviceId
+| where StageTime between (AnchorTime .. AnchorTime + CorrelationWindow)
+| summarize
+    Stages = make_set(Stage, 14),
+    StageDetails = make_set(strcat(Stage, ": ", StageDescription), 24),
+    StageCount = dcount(Stage),
+    EventCount = count(),
+    FirstSeen = min(StageTime),
+    LastSeen = max(StageTime),
+    Processes = make_set(ProcessName, 20),
+    ProcessCommandLines = make_set(ProcessCommandLine, 20),
+    Accounts = make_set(AccountName, 20),
+    AccountSids = make_set(AccountSid, 20),
+    Evidence = make_set(Evidence, 20),
+    AdditionalContexts = make_set(AdditionalContext, 20),
+    ReportRefs = make_set(strcat(tostring(StageTime), ":", tostring(ReportId)), 50)
+    by DeviceId, DeviceName, WindowStart = AnchorTime
+| summarize arg_max(StageCount, *) by DeviceId, WindowBucket = bin(FirstSeen, 10m)
+| extend
+    HasSystem32TieringWrite = set_has_element(Stages, "Stage4_System32TieringWrite"),
+    HasSystemConhostSpawn = set_has_element(Stages, "Stage5_SystemConhostSpawn"),
+    HasTempDirReparsePivot = set_has_element(Stages, "Stage6_TempDirReparsePivot"),
+    HasBatchOplockVss = set_has_element(Stages, "Stage7_BatchOplockVss"),
+    HasCloudFilesSyncRoot = set_has_element(Stages, "Stage8_CloudFilesSyncRoot"),
+    HasStorageTiersComActivation = set_has_element(Stages, "Stage9_StorageTiersComActivation"),
+    HasMicrosoftDetectionName = set_has_element(Stages, "Stage10_MicrosoftDetectionName")
+| where HasMicrosoftDetectionName
+    or (HasStorageTiersComActivation and HasSystem32TieringWrite)
+    or (HasStorageTiersComActivation and HasSystemConhostSpawn)
+    or (HasCloudFilesSyncRoot and (HasTempDirReparsePivot or HasBatchOplockVss))
+    or (set_has_element(Stages, "Stage1_TempTargetDrop") and HasSystem32TieringWrite)
+    or StageCount >= 3
+| extend
+    AlertSeverity = case(
+                    HasMicrosoftDetectionName,
+                    "Critical",
+                    HasStorageTiersComActivation and (HasSystem32TieringWrite or HasSystemConhostSpawn),
+                    "Critical",
+                    HasCloudFilesSyncRoot and (HasTempDirReparsePivot or HasBatchOplockVss),
+                    "High",
+                    set_has_element(Stages, "Stage1_TempTargetDrop") and HasSystem32TieringWrite,
+                    "High",
+                    StageCount >= 3,
+                    "High",
+                    "Informational"
+                ),
+    TTP = "T1068,T1574.010,T1055,T1543.003",
+    DetectionReason = "Conservative RedSun production candidate: Microsoft detection-name telemetry or strong Storage Tiers, System32 write, SYSTEM execution, or Cloud Files pivot evidence within 60 minutes",
+    RecommendedAction = "Validate Storage Tiers COM activity, confirm whether System32 writes or SYSTEM process creation were legitimate, and review any Cloud Files mitigation exceptions before escalating.",
+    SourceRefs = "SOURCES.md#redsun"
+| project-reorder
+    AlertSeverity,
+    DetectionReason,
+    RecommendedAction,
+    SourceRefs,
+    FirstSeen,
+    LastSeen,
+    DeviceName,
+    DeviceId,
+    StageCount,
+    EventCount,
+    Stages,
+    StageDetails,
+    Processes,
+    ProcessCommandLines,
+    Accounts,
+    AccountSids,
+    Evidence,
+    TTP,
+    ReportRefs,
+    AdditionalContexts
+| order by StageCount desc, FirstSeen asc

@@ -8,7 +8,7 @@ The RedSun package contains Microsoft Defender XDR Advanced Hunting queries for 
 
 The main query is intended to correlate multiple weak and medium-strength signals into a higher-confidence device-level alert. The standalone queries are intended for baseline review and stage-specific investigation.
 
-As of the research report dated April 19, 2026, RedSun did not have a public CVE assignment or public Microsoft patch identified. Treat this package as behavior-focused hunting content, not as proof that an endpoint is patched or unpatched.
+As of the 2026-05-05 source review, no public Microsoft CVE or vendor patch was verified for RedSun. Huntress reported RedSun remained unpatched as of 2026-04-20. Treat this package as behavior-focused hunting content, not as proof that an endpoint is patched or unpatched. Source-backed compensating-control caveats for the Cloud Files Mini Filter are documented in `MITIGATIONS.md`.
 
 ## File Layout
 
@@ -25,6 +25,7 @@ As of the research report dated April 19, 2026, RedSun did not have a public CVE
 | `09_redsun_stage8_cloud_files_sync_root.kql` | Standalone Stage 8: Cloud Files sync root registration by a non-standard process. |
 | `10_redsun_stage9_storage_tiers_com_activation.kql` | Standalone Stage 9: Storage Tiers Management COM activation marker. |
 | `11_redsun_stage10_microsoft_detection_name.kql` | Standalone Stage 10: Microsoft Defender RedSun detection-name telemetry. |
+| `production/redsun_conservative_custom_detection.kql` | Conservative scheduled-detection candidate derived from the main hunting query. |
 
 ## Main Query Behavior
 
@@ -225,9 +226,22 @@ Potential benign sources include:
 - Storage administration tools and management consoles.
 - Lab antivirus detections or validation simulations.
 
+## Compensating Control Caveat
+
+Qualys documented disabling the Cloud Files Mini Filter as a possible compensating control where business impact is acceptable.
+
+Use that guidance carefully:
+
+- this is not a vendor patch;
+- test before broad deployment;
+- validate OneDrive Files On-Demand and other Cloud Files placeholder or hydration workflows;
+- document any exception or rollback decision.
+
 ## Production Deployment Guidance
 
-Use the main query as a hunting query first. For scheduled alerting, consider requiring one of:
+Use the main query as a hunting query first. For scheduled custom detection work, start from `production/redsun_conservative_custom_detection.kql` and keep `01_redsun_full_attack_chain.kql` as the broader hunting query.
+
+When tuning the production variant, consider requiring one of:
 
 - Stage 4 plus any other stage.
 - Stage 5 plus any other stage.

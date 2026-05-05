@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Letlaka
 // AI-generated detection content. Review, test, tune, and verify before production use.
+// DetectionMetadata:
+//   Family: UnDefend
+//   QueryType: Hunting
+//   Severity: Medium
+//   Confidence: Medium
+//   DataSources: DeviceEvents
+//   ATTACK: T1562.001,T1112,T1007,T1083
+//   SourceRefs: SOURCES.md#undefend
+//   ProductionReady: No
+//   LastVerified: 2026-05-05
 
 // Purpose:
 //   Standalone UnDefend Stage 6 hunt from 01_undefend_full_attack_chain.kql.

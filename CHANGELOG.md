@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-05-05
+
+### Added
+
+- `CrossFamily` detection package with shared hunting for observed tooling execution, BeigeBurrow follow-on tunnel activity, and recon commands near suspicious tooling.
+- `Exposure/01_bluehammer_defender_platform_exposure.kql` and `Exposure/README.md` as tenant-verified platform exposure reporting templates.
+- `ExternalTelemetry/README.md` for documentation-only VPN and SIEM correlation indicators.
+- `SOURCES.md` for source traceability across CVE facts, IOC additions, and mitigation references.
+- `IOCS.md` for observed indicator confidence and usage guidance.
+- `MITIGATIONS.md`, `ATTACK_MAPPING.md`, and `DEPLOYMENT_GUIDE.md` for source-backed mitigation, ATT&CK, and rollout guidance.
+- `UnDefend/09_undefend_defender_health_and_signature_staleness.kql` for correlated Defender health and staleness hunting after suspicious access.
+- Conservative production query variants under `BlueHammer/production/`, `RedSun/production/`, `UnDefend/production/`, and `CrossFamily/production/`.
+
+### Changed
+
+- Corrected the documented BlueHammer fixed Defender Antimalware Platform baseline from `4.18.26050.3011` to `4.18.26030.3011`.
+- Updated root and package documentation to reflect the 2026-05-05 source review and the behavior-focused status of RedSun and UnDefend.
+- Expanded BlueHammer Stage 7 detection-name matching to include `Exploit:Win32/DfndrPEBluHmr.BZ`.
+- Extended CrossFamily hunting to preserve nearby BlueHammer `.BZ`, EICAR, and observed aggressive `undef.exe` command-line context.
+- Added `// DetectionMetadata:` blocks across the KQL inventory and expanded repository validation to enforce metadata, production placement, and IOC source mapping.
+- Extended repository validation and contribution metadata to include `CrossFamily`, `Exposure`, and the production query split.
+
+### Validation
+
+- Static repository validation now covers metadata blocks, support-document presence, production placement, IOC source mapping, `Exposure/`, and `CrossFamily` with the same numbering, stage-alignment, and README-coverage rules as the existing packages.
+- Confirmed `4.18.26050.3011` no longer appears as the active BlueHammer fixed baseline in repository guidance; remaining references are historical or explicitly marked non-authoritative.
+
 ## 2026-04-20
 
 ### Added

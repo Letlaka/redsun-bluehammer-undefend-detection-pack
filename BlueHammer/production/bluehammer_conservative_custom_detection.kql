@@ -1,0 +1,603 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+// DetectionMetadata:
+//   Family: BlueHammer
+//   QueryType: Production
+//   Severity: High
+//   Confidence: High
+//   DataSources: DeviceEvents, DeviceFileEvents, DeviceImageLoadEvents, DeviceNetworkEvents, DeviceProcessEvents, DeviceRegistryEvents
+//   ATTACK: T1068,T1003.002,T1543.003
+//   SourceRefs: SOURCES.md#bluehammer
+//   ProductionReady: Yes
+//   LastVerified: 2026-05-05
+
+// Purpose:
+//   Conservative scheduled-detection candidate derived from the BlueHammer
+//   hunting query. This variant keeps only the stronger production-worthy
+//   combinations.
+//
+// Notes:
+//   Several low-level primitives, such as raw oplock and object-manager symlink
+//   operations, are tenant- and sensor-dependent in Defender XDR telemetry.
+//   Those stages are opportunistic and rely on DeviceEvents.AdditionalFields.
+
+let Lookback = 2h;
+let CorrelationWindow = 30m;
+let CorrelationStep = 5m;
+let TrustedWUProcesses = dynamic([
+    "wuauclt.exe", "MsMpEng.exe", "svchost.exe", "TiWorker.exe",
+    "UsoClient.exe", "WaaSMedicAgent.exe", "MusNotification.exe", "wusa.exe"
+]);
+let TrustedUpdateAgents = dynamic([
+    "MsMpEng.exe", "MpCmdRun.exe", "WaaSMedicAgent.exe", "TiWorker.exe",
+    "svchost.exe", "wuauclt.exe", "MpSigStub.exe", "NisSrv.exe", "WdNisSvc.exe"
+]);
+let TrustedSyncProviders = dynamic([
+    "OneDrive.exe", "GoogleDriveFS.exe", "googledrivesync.exe", "Dropbox.exe",
+    "DropboxUpdate.exe", "FileCoAuth.exe", "SharePoint.exe", "Box.exe", "BoxDrive.exe"
+]);
+let TrustedMpRPCCallers = dynamic([
+    "MsMpEng.exe", "MpCmdRun.exe", "svchost.exe", "SecurityHealthService.exe",
+    "WdNisSvc.exe", "NisSrv.exe"
+]);
+let TrustedDefenderProcesses = dynamic([
+    "MsMpEng.exe", "MpCmdRun.exe", "svchost.exe", "NisSrv.exe", "WdNisSvc.exe",
+    "SecurityHealthService.exe", "TrustedInstaller.exe", "TiWorker.exe",
+    "WaaSMedicAgent.exe", "MpSigStub.exe"
+]);
+let TrustedLSACallers = dynamic([
+    "lsass.exe", "svchost.exe", "MsMpEng.exe", "WdNisSvc.exe",
+    "SecurityHealthService.exe", "services.exe"
+]);
+let TrustedSamCallers = dynamic([
+    "lsass.exe", "svchost.exe", "logonui.exe", "winlogon.exe", "services.exe"
+]);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+let IsTempPath = (Path:string) {
+    tolower(Path) contains @"\appdata\local\temp\"
+    or tolower(Path) contains @"\windows\temp\"
+    or tolower(Path) startswith @"c:\temp\"
+    or tolower(Path) contains @"\temp\"
+};
+let IsUserWritablePath = (Path:string) {
+    tolower(Path) contains @"\users\"
+    or tolower(Path) contains @"\programdata\"
+    or IsTempPath(Path)
+};
+
+let AllStages =
+    materialize(
+        union
+            (
+                DeviceImageLoadEvents
+                | where Timestamp >= ago(Lookback)
+                | where FileName in~ ("wuapi.dll", "wuaueng.dll")
+                | extend InitiatingPathLower = tolower(InitiatingProcessFolderPath)
+                | where not(
+                    InitiatingPathLower startswith @"c:\windows\system32\"
+                    or InitiatingPathLower startswith @"c:\windows\syswow64\"
+                    or InitiatingPathLower startswith @"c:\windows\winsxs\"
+                )
+                | where InitiatingProcessFileName !in~ (TrustedWUProcesses)
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage1_WindowsUpdateComApiLoad",
+                    StageDescription = "Windows Update API DLL loaded by a non-standard process outside Windows system paths",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = NormalizePath(FolderPath, FileName),
+                    AdditionalContext = strcat("LoadedLibrary=", FileName, " | LibraryPath=", FolderPath)
+            ),
+            (
+                DeviceNetworkEvents
+                | where Timestamp >= ago(Lookback)
+                | where RemoteUrl contains "go.microsoft.com"
+                    and RemoteUrl contains "LinkID=121721"
+                | where InitiatingProcessFileName !in~ (TrustedUpdateAgents)
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage2_DefenderUpdateCdnDownload",
+                    StageDescription = "Defender update package URL requested by a non-update process",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = RemoteUrl,
+                    AdditionalContext = strcat("RemoteIP=", RemoteIP, " | RemotePort=", tostring(RemotePort), " | RemoteUrl=", RemoteUrl)
+            ),
+            (
+                DeviceFileEvents
+                | where Timestamp >= ago(Lookback)
+                | where ActionType in~ ("FileCreated", "FileModified", "FileRenamed")
+                | where IsTempPath(FolderPath) or IsTempPath(PreviousFolderPath)
+                | where FileName endswith ".exe" or FileName endswith ".com"
+                | join kind=inner (
+                    DeviceEvents
+                    | where Timestamp >= ago(Lookback)
+                    | where ActionType == "AntivirusDetection"
+                    | where tostring(AdditionalFields) has "EICAR"
+                    | project DeviceId, EicarTime = Timestamp, EicarReportId = ReportId, EicarDetails = tostring(AdditionalFields)
+                ) on DeviceId
+                | where Timestamp between (EicarTime - 30s .. EicarTime + 30s)
+                | extend FilePath = NormalizePath(FolderPath, FileName)
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage3a_EicarTempExecutable",
+                    StageDescription = "Executable written in a temporary path within 30 seconds of an EICAR antivirus detection",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = FilePath,
+                    AdditionalContext = strcat("EicarTime=", tostring(EicarTime), " | EicarDetails=", EicarDetails)
+            ),
+            (
+                DeviceRegistryEvents
+                | where Timestamp >= ago(Lookback)
+                | where ActionType in~ ("RegistryKeyCreated", "RegistryValueSet")
+                | where RegistryKey contains @"\Explorer\SyncRootManager\"
+                    or RegistryKey contains @"\SyncRootManager\"
+                | where InitiatingProcessFileName !in~ (TrustedSyncProviders)
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage3b_CloudFilesSyncRoot",
+                    StageDescription = "Cloud Files sync root registered by a non-standard process",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = RegistryKey,
+                    AdditionalContext = strcat("RegistryValueName=", RegistryValueName, " | RegistryValueData=", RegistryValueData)
+            ),
+            (
+                DeviceEvents
+                | where Timestamp >= ago(Lookback)
+                | extend AdditionalFieldsText = tostring(AdditionalFields)
+                | where ActionType in~ ("FileOpened", "DeviceIoControl", "DeviceIoControlFile", "OtherAlertRelatedActivity")
+                    or AdditionalFieldsText contains "FSCTL_REQUEST_BATCH_OPLOCK"
+                    or AdditionalFieldsText contains "REQUEST_BATCH_OPLOCK"
+                    or AdditionalFieldsText contains "BatchOplock"
+                | where AdditionalFieldsText contains "RstrtMgr"
+                    or FileName =~ "RstrtMgr.dll"
+                    or FolderPath contains "RstrtMgr.dll"
+                | where InitiatingProcessFileName !in~ ("svchost.exe", "TrustedInstaller.exe", "MsMpEng.exe", "msiexec.exe", "rrsetup.exe")
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage3c_RstrtMgrOplockSignal",
+                    StageDescription = "RstrtMgr.dll file-control or oplock-related telemetry from a non-standard process",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = NormalizePath(FolderPath, FileName),
+                    AdditionalContext = AdditionalFieldsText
+            ),
+            (
+                DeviceProcessEvents
+                | where Timestamp >= ago(Lookback)
+                | where FileName =~ "vssvc.exe"
+                    or ProcessCommandLine has_any ("vssadmin", "VSSVC", "shadow copy")
+                | join kind=inner (
+                    DeviceEvents
+                    | where Timestamp >= ago(Lookback)
+                    | where ActionType == "AntivirusDetection"
+                    | where tostring(AdditionalFields) has "EICAR"
+                    | project DeviceId, EicarTime = Timestamp, EicarDetails = tostring(AdditionalFields)
+                ) on DeviceId
+                | where Timestamp between (EicarTime - 10m .. EicarTime + 10m)
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage3d_VssNearEicar",
+                    StageDescription = "VSS process activity within 10 minutes of an EICAR antivirus detection",
+                    ProcessName = FileName,
+                    ProcessPath = NormalizePath(FolderPath, FileName),
+                    ProcessCommandLine,
+                    AccountName,
+                    AccountSid,
+                    Evidence = ProcessCommandLine,
+                    AdditionalContext = strcat("EicarTime=", tostring(EicarTime), " | EicarDetails=", EicarDetails, " | Parent=", InitiatingProcessFileName)
+            ),
+            (
+                DeviceEvents
+                | where Timestamp >= ago(Lookback)
+                | extend AdditionalFieldsText = tostring(AdditionalFields)
+                | where AdditionalFieldsText contains "IMpService"
+                    or AdditionalFieldsText contains "c503f532"
+                    or AdditionalFieldsText contains "IMpService77BDAF73"
+                    or AdditionalFieldsText contains "ServerMpUpdateEngineSignature"
+                    or AdditionalFieldsText contains "Proc42"
+                    or (ActionType contains "NamedPipe" and (AdditionalFieldsText contains "IMpService" or AdditionalFieldsText contains "MpService"))
+                | where InitiatingProcessFileName !in~ (TrustedMpRPCCallers)
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage4a_DefenderPrivateRpcSignal",
+                    StageDescription = "Defender private RPC/ALPC marker observed from a non-standard process",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = AdditionalFieldsText,
+                    AdditionalContext = AdditionalFieldsText
+            ),
+            (
+                DeviceEvents
+                | where Timestamp >= ago(Lookback)
+                | extend AdditionalFieldsText = tostring(AdditionalFields)
+                | where ActionType in~ ("CreateSymbolicLink", "NtCreateSymbolicLinkObject", "ObjectAccess", "SymbolicLinkCreated")
+                    or AdditionalFieldsText contains "SymbolicLink"
+                | where AdditionalFieldsText contains @"\Sessions\"
+                    and AdditionalFieldsText contains "BaseNamedObjects"
+                | where InitiatingProcessFileName !in~ ("svchost.exe", "csrss.exe", "smss.exe", "lsass.exe", "wininit.exe")
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage4b_SessionNamespaceSymlink",
+                    StageDescription = "Session namespace symbolic-link activity involving BaseNamedObjects",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = AdditionalFieldsText,
+                    AdditionalContext = AdditionalFieldsText
+            ),
+            (
+                DeviceFileEvents
+                | where Timestamp >= ago(Lookback)
+                | extend FolderPathLower = tolower(FolderPath)
+                | where FolderPathLower startswith @"c:\programdata\microsoft\windows defender\definition updates"
+                | where ActionType in~ ("FileAccessed", "DirectoryRead", "FileRead", "FileOpened")
+                | where InitiatingProcessFileName !in~ (TrustedDefenderProcesses)
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage4c_DefenderDefinitionDirectoryRead",
+                    StageDescription = "Defender definition update directory read or monitored by a non-standard process",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = NormalizePath(FolderPath, FileName),
+                    AdditionalContext = strcat("ActionType=", ActionType, " | Path=", NormalizePath(FolderPath, FileName))
+            ),
+            (
+                DeviceFileEvents
+                | where Timestamp >= ago(Lookback)
+                | extend
+                    FilePath = NormalizePath(FolderPath, FileName),
+                    FilePathLower = tolower(NormalizePath(FolderPath, FileName))
+                | where FilePathLower contains "harddiskvolumeshadowcopy"
+                | where FilePathLower matches regex @"\\windows\\system32\\config\\(sam|system|security|ntds\.dit)$"
+                    or FileName in~ ("SAM", "SYSTEM", "SECURITY", "NTDS.dit")
+                | where InitiatingProcessFileName !in~ ("svchost.exe", "wbengine.exe", "vssvc.exe", "WinBackup.exe", "robocopy.exe", "xcopy.exe")
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage4d_VssHiveRead",
+                    StageDescription = "SAM, SYSTEM, SECURITY, or NTDS hive read from a VSS path",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = FilePath,
+                    AdditionalContext = strcat("ActionType=", ActionType, " | Path=", FilePath)
+            ),
+            (
+                DeviceRegistryEvents
+                | where Timestamp >= ago(Lookback)
+                | where ActionType in~ ("RegistryKeyQueried", "RegistryValueQueried", "RegistryKeyAccessed")
+                | where RegistryKey matches regex @"(?i)\\Control\\Lsa\\(JD|Skew1|GBG|Data)$"
+                | where InitiatingProcessFileName !in~ (TrustedLSACallers)
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage5a_LsaBootKeyRegistryRead",
+                    StageDescription = "LSA boot-key registry subkey read by a non-standard process",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = RegistryKey,
+                    AdditionalContext = strcat("RegistryValueName=", RegistryValueName, " | RegistryValueData=", RegistryValueData)
+            ),
+            (
+                DeviceImageLoadEvents
+                | where Timestamp >= ago(Lookback)
+                | where FileName in~ ("samlib.dll", "offreg.dll")
+                | where InitiatingProcessFileName !in~ (TrustedSamCallers)
+                | where FileName =~ "offreg.dll"
+                    or IsUserWritablePath(InitiatingProcessFolderPath)
+                    or InitiatingProcessVersionInfoCompanyName !~ "Microsoft Corporation"
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage5b_SamlibOrOffregLoad",
+                    StageDescription = "samlib.dll or offreg.dll dynamically loaded by a non-standard process",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = NormalizePath(FolderPath, FileName),
+                    AdditionalContext = strcat("LoadedLibrary=", FileName, " | LibraryPath=", FolderPath)
+            ),
+            (
+                DeviceEvents
+                | where Timestamp >= ago(Lookback)
+                | extend AdditionalFieldsText = tostring(AdditionalFields)
+                | extend HasPublicPasswordMarker = AdditionalFieldsText contains "$PWNed666!!!WDFAIL"
+                    or InitiatingProcessCommandLine contains "$PWNed666!!!WDFAIL"
+                | where ActionType in~ ("UserAccountPasswordChanged", "UserAccountModified")
+                    or HasPublicPasswordMarker
+                | summarize
+                    Timestamp = min(Timestamp),
+                    LastSeen = max(Timestamp),
+                    PasswordChanges = countif(ActionType in~ ("UserAccountPasswordChanged", "UserAccountModified")),
+                    MarkerHits = countif(HasPublicPasswordMarker),
+                    DeviceName = any(DeviceName),
+                    ReportId = any(ReportId),
+                    Accounts = make_set(AdditionalFieldsText, 20),
+                    ProcessCommandLine = any(InitiatingProcessCommandLine),
+                    AccountName = any(InitiatingProcessAccountName),
+                    AccountSid = any(InitiatingProcessAccountSid)
+                  by DeviceId, ProcessName = InitiatingProcessFileName, ProcessPath = InitiatingProcessFolderPath, WindowBucket = bin(Timestamp, 2m)
+                | where PasswordChanges >= 4 or MarkerHits > 0
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage5c_LocalPasswordChangeBurst",
+                    StageDescription = "Burst of local account password change or modification events within two minutes, or public BlueHammer password marker observed",
+                    ProcessName,
+                    ProcessPath = NormalizePath(ProcessPath, ProcessName),
+                    ProcessCommandLine,
+                    AccountName,
+                    AccountSid,
+                    Evidence = strcat("PasswordChanges=", tostring(PasswordChanges), " | MarkerHits=", tostring(MarkerHits)),
+                    AdditionalContext = strcat("LastSeen=", tostring(LastSeen), " | Accounts=", tostring(Accounts))
+            ),
+            (
+                DeviceEvents
+                | where Timestamp >= ago(Lookback)
+                | where ActionType == "ServiceInstalled"
+                | extend
+                    AdditionalFieldsText = tostring(AdditionalFields),
+                    ParsedAdditionalFields = parse_json(AdditionalFields)
+                | extend ServiceName = tostring(coalesce(ParsedAdditionalFields.ServiceName, ParsedAdditionalFields.Service, ParsedAdditionalFields.Name))
+                | extend ServiceName = iff(isempty(ServiceName), extract(@"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", 0, AdditionalFieldsText), ServiceName)
+                | where ServiceName matches regex @"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage6a_GuidNamedServiceInstalled",
+                    StageDescription = "Windows service installed with a GUID-shaped service name",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = ServiceName,
+                    AdditionalContext = AdditionalFieldsText
+            ),
+            (
+                DeviceProcessEvents
+                | where Timestamp >= ago(Lookback)
+                | where FileName =~ "conhost.exe"
+                | extend ParentPathLower = tolower(InitiatingProcessFolderPath)
+                | where InitiatingProcessFileName !in~ (
+                    "csrss.exe", "cmd.exe", "powershell.exe", "pwsh.exe",
+                    "WindowsTerminal.exe", "wt.exe", "conhost.exe"
+                )
+                | where InitiatingProcessParentFileName !in~ ("csrss.exe", "wininit.exe", "smss.exe")
+                | where IsUserWritablePath(InitiatingProcessFolderPath)
+                    or not(
+                        ParentPathLower startswith @"c:\windows\system32\"
+                        or ParentPathLower startswith @"c:\windows\syswow64\"
+                        or ParentPathLower startswith @"c:\windows\servicing\"
+                        or ParentPathLower startswith @"c:\windows\winsxs\"
+                    )
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage6b_NonstandardConhostSpawn",
+                    StageDescription = "conhost.exe spawned from a non-standard parent chain",
+                    ProcessName = FileName,
+                    ProcessPath = NormalizePath(FolderPath, FileName),
+                    ProcessCommandLine,
+                    AccountName,
+                    AccountSid,
+                    Evidence = ProcessCommandLine,
+                    AdditionalContext = strcat("Parent=", InitiatingProcessFileName, " | ParentCommandLine=", InitiatingProcessCommandLine)
+            ),
+            (
+                DeviceEvents
+                | where Timestamp >= ago(Lookback)
+                | extend AdditionalFieldsText = tostring(AdditionalFields)
+                | where ActionType == "AntivirusDetection"
+                    or ActionType contains "Antivirus"
+                    or AdditionalFieldsText contains "ThreatName"
+                | where AdditionalFieldsText contains "Behavior:Win32/CVE-2026-33825.Z!MTB"
+                    or AdditionalFieldsText contains "Exploit:Win32/DfndrPEBluHmr.BB"
+                    or AdditionalFieldsText contains "Exploit:Win32/DfndrPEBluHmr.BZ"
+                    or AdditionalFieldsText contains "CVE-2026-33825"
+                    or AdditionalFieldsText contains "DfndrPEBluHmr"
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage7_MicrosoftDetectionName",
+                    StageDescription = "Microsoft Defender threat detection name associated with BlueHammer observed",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = AdditionalFieldsText,
+                    AdditionalContext = AdditionalFieldsText
+            )
+        | where isnotempty(DeviceId) and isnotempty(Timestamp)
+        | extend StageTime = Timestamp
+    );
+AllStages
+| extend WindowStart = bin(StageTime, CorrelationStep)
+| union (
+    AllStages
+    | extend WindowStart = bin(StageTime, CorrelationStep) - 5m
+)
+| union (
+    AllStages
+    | extend WindowStart = bin(StageTime, CorrelationStep) - 10m
+)
+| union (
+    AllStages
+    | extend WindowStart = bin(StageTime, CorrelationStep) - 15m
+)
+| union (
+    AllStages
+    | extend WindowStart = bin(StageTime, CorrelationStep) - 20m
+)
+| union (
+    AllStages
+    | extend WindowStart = bin(StageTime, CorrelationStep) - 25m
+)
+| union (
+    AllStages
+    | extend WindowStart = bin(StageTime, CorrelationStep) - CorrelationWindow
+)
+| summarize hint.strategy = shuffle
+    Stages = make_set(Stage, 20),
+    StageDetails = make_set(strcat(Stage, ": ", StageDescription), 20),
+    StageCount = dcount(Stage),
+    EventCount = count(),
+    FirstSeen = min(StageTime),
+    LastSeen = max(StageTime),
+    Processes = make_set(ProcessName, 20),
+    ProcessCommandLines = make_set(ProcessCommandLine, 20),
+    Accounts = make_set(AccountName, 20),
+    AccountSids = make_set(AccountSid, 20),
+    Evidence = make_set(Evidence, 20),
+    AdditionalContexts = make_set(AdditionalContext, 20),
+    ReportRefs = make_set(strcat(tostring(StageTime), ":", tostring(ReportId)), 40)
+  by DeviceId, DeviceName, WindowStart
+| where LastSeen between (WindowStart .. WindowStart + CorrelationWindow + CorrelationStep)
+| extend
+    HasEicarTempExecutable = set_has_element(Stages, "Stage3a_EicarTempExecutable"),
+    HasCloudSyncRoot = set_has_element(Stages, "Stage3b_CloudFilesSyncRoot"),
+    HasVssNearEicar = set_has_element(Stages, "Stage3d_VssNearEicar"),
+    HasDefenderRpcSignal = set_has_element(Stages, "Stage4a_DefenderPrivateRpcSignal"),
+    HasSessionSymlink = set_has_element(Stages, "Stage4b_SessionNamespaceSymlink"),
+    HasDefenderDownload = set_has_element(Stages, "Stage2_DefenderUpdateCdnDownload"),
+    HasVssHiveRead = set_has_element(Stages, "Stage4d_VssHiveRead"),
+    HasLsaBootKeyRead = set_has_element(Stages, "Stage5a_LsaBootKeyRegistryRead"),
+    HasSamlibOrOffreg = set_has_element(Stages, "Stage5b_SamlibOrOffregLoad"),
+    HasGuidService = set_has_element(Stages, "Stage6a_GuidNamedServiceInstalled"),
+    HasConhost = set_has_element(Stages, "Stage6b_NonstandardConhostSpawn"),
+    HasMicrosoftDetectionName = set_has_element(Stages, "Stage7_MicrosoftDetectionName")
+| extend
+    HasBlueHammerAnchor = HasDefenderDownload
+        or HasMicrosoftDetectionName
+        or HasEicarTempExecutable
+        or HasCloudSyncRoot
+        or HasVssNearEicar
+        or HasDefenderRpcSignal
+        or HasSessionSymlink
+        or HasVssHiveRead
+        or HasLsaBootKeyRead
+        or HasGuidService
+| where HasBlueHammerAnchor
+| where HasMicrosoftDetectionName
+    or (HasVssHiveRead and (HasGuidService or HasConhost))
+    or (HasLsaBootKeyRead and HasSamlibOrOffreg and (HasGuidService or HasConhost))
+    or (HasDefenderDownload and (HasCloudSyncRoot or HasVssNearEicar or HasVssHiveRead))
+    or StageCount >= 4
+| extend
+    AlertSeverity = case(
+        HasMicrosoftDetectionName, "Critical",
+        HasVssHiveRead and (HasGuidService or HasConhost), "Critical",
+        HasLsaBootKeyRead and HasSamlibOrOffreg and (HasGuidService or HasConhost), "High",
+        HasDefenderDownload and (HasCloudSyncRoot or HasVssNearEicar or HasVssHiveRead), "High",
+        StageCount >= 4, "High",
+        "Informational"
+    ),
+    TTP = "T1003.002,T1134,T1543.003,T1552.002,T1557,T1620,T1105,T1546",
+    DetectionReason = "Conservative BlueHammer production candidate: Microsoft detection-name telemetry or strong multi-stage credential-access and execution correlation within 30 minutes",
+    RecommendedAction = "Review Defender device timeline, confirm whether the device is at Defender platform 4.18.26030.3011 or later, and investigate VSS, service, and credential-access evidence immediately.",
+    SourceRefs = "SOURCES.md#bluehammer"
+| project-reorder
+    AlertSeverity,
+    DetectionReason,
+    RecommendedAction,
+    SourceRefs,
+    FirstSeen,
+    LastSeen,
+    DeviceName,
+    DeviceId,
+    StageCount,
+    EventCount,
+    Stages,
+    StageDetails,
+    Processes,
+    ProcessCommandLines,
+    Accounts,
+    AccountSids,
+    Evidence,
+    TTP,
+    ReportRefs,
+    AdditionalContexts
+| order by StageCount desc, FirstSeen asc

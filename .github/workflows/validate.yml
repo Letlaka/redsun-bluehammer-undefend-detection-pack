@@ -31,4 +31,4 @@ jobs:
           python-version: "3.x"
 
       - name: Run repository validation
-        run: python .github/scripts/validate_repository.py
+        run: python3 .github/scripts/validate_repository.py

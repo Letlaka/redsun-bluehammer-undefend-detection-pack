@@ -8,7 +8,7 @@ The UnDefend package contains Microsoft Defender XDR Advanced Hunting queries fo
 
 The package is intended to identify suspicious behavior around Defender update and service surfaces. It does not prove tampering by itself. Analysts must correlate results with process lineage, user context, change-control history, software inventory, and Defender device timeline evidence.
 
-As of the research report dated April 19, 2026, UnDefend did not have a public CVE assignment or public Microsoft patch identified. This package focuses on Defender degradation behavior, especially suspicious definition-file access followed by service or update failure effects.
+As of the 2026-05-05 source review, no public Microsoft CVE or vendor patch was verified for UnDefend. Huntress reported UnDefend remained unpatched as of 2026-04-20. This package focuses on Defender degradation behavior, especially suspicious definition-file access followed by service or update failure effects. The added Stage 8 query surfaces health and staleness context after suspicious access, but it still depends on tenant-specific validation of Defender version signals.
 
 ## File Layout
 
@@ -22,6 +22,8 @@ As of the research report dated April 19, 2026, UnDefend did not have a public C
 | `06_undefend_stage5_windefend_stop_after_suspicious_access.kql` | Stage 5: WinDefend stopped, disabled, or reconfigured. |
 | `07_undefend_stage6_update_failure_after_signature_access.kql` | Stage 6: Defender update, signature, service, or engine failure telemetry. |
 | `08_undefend_stage7_mrt_directory_access.kql` | Stage 7: MRT directory access by a non-system, non-MRT process. |
+| `09_undefend_defender_health_and_signature_staleness.kql` | Stage 8: suspicious signature-file access followed by Defender health, update, or staleness degradation. |
+| `production/undefend_conservative_custom_detection.kql` | Conservative scheduled-detection candidate derived from the main hunting query. |
 
 ## Main Query Behavior
 
@@ -167,9 +169,23 @@ Tuning notes:
 
 - Confirm legitimate patching, Windows servicing, and vulnerability management behavior.
 
+### Stage 8: Defender Health and Signature Staleness
+
+Correlates suspicious Defender signature-file access with follow-on update, engine, or service-health degradation and surfaces any version context that the tenant exposes in Advanced Hunting.
+
+Primary tables:
+
+- `DeviceFileEvents`
+- `DeviceEvents`
+
+Why it matters:
+
+- It strengthens analyst review when suspicious definition-file access is followed by update or engine failures.
+- It does not assume a universal tenant source for Defender platform or signature version fields; validate those signals against tenant-specific inventory where available.
+
 ## Expected Analyst Workflow
 
-1. Run standalone queries `02` through `08`.
+1. Run standalone queries `02` through `09`.
 2. Baseline legitimate Defender management and security software.
 3. Tune trusted process arrays and trusted Defender paths.
 4. Run `01_undefend_full_attack_chain.kql`.
@@ -190,6 +206,8 @@ Potential benign sources include:
 - Proxy or update infrastructure failures.
 
 ## Production Deployment Guidance
+
+For scheduled custom detection work, start from `production/undefend_conservative_custom_detection.kql` and keep `01_undefend_full_attack_chain.kql` as the broader hunting query.
 
 Recommended higher-confidence production conditions:
 

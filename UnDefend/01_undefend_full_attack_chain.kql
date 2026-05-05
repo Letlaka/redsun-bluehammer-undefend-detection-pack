@@ -1,9 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Letlaka
 // AI-generated detection content. Review, test, tune, and verify before production use.
+// DetectionMetadata:
+//   Family: UnDefend
+//   QueryType: Hunting
+//   Severity: High
+//   Confidence: Medium
+//   DataSources: DeviceEvents, DeviceFileEvents, DeviceRegistryEvents
+//   ATTACK: T1562.001,T1112,T1007,T1083
+//   SourceRefs: SOURCES.md#undefend
+//   ProductionReady: No
+//   LastVerified: 2026-05-05
 
 // Purpose:
-//   Main UnDefend composite runner for standalone 02-08 stage hunts.
+//   Main UnDefend composite runner for standalone 02-09 stage hunts.
 //   Correlates Defender registry recon, signature file access, update directory
 //   monitoring, WinDefend service monitoring, service/update failure side effects,
 //   and MRT directory access.
@@ -51,6 +61,119 @@ let SignatureFiles = dynamic([
     "mpavbase.vdm", "mpavbase.lkg", "mpasbase.vdm", "mpasbase.lkg",
     "mpavdlta.vdm", "mpasdlta.vdm"
 ]);
+let Stage8_DefenderHealthAndSignatureStaleness =
+    (
+        let SuspiciousAccessForHealth =
+            DeviceFileEvents
+            | where Timestamp >= ago(Lookback)
+            | where ActionType in~ ("FileAccessed", "FileRead", "FileOpened", "FileModified")
+            | where FileName in~ (SignatureFiles)
+            | where IsDefenderDefinitionPath(FolderPath)
+            | where InitiatingProcessFileName !in~ (TrustedDefenderProcesses)
+            | where not(IsTrustedDefenderPath(InitiatingProcessFolderPath))
+            | project
+                DeviceId,
+                DeviceName,
+                SuspiciousAccessTime = Timestamp,
+                SuspiciousProcess = InitiatingProcessFileName,
+                SuspiciousProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                SuspiciousProcessCommandLine = InitiatingProcessCommandLine,
+                SuspiciousAccountName = InitiatingProcessAccountName,
+                SuspiciousAccountSid = InitiatingProcessAccountSid,
+                SuspiciousEvidence = NormalizePath(FolderPath, FileName),
+                SuspiciousReportId = ReportId;
+        let FailureSignalsForHealth =
+            DeviceEvents
+            | where Timestamp >= ago(Lookback)
+            | extend AdditionalFieldsText = tostring(AdditionalFields)
+            | extend
+                HasEventId2001 = AdditionalFieldsText contains "EventID=2001"
+                    or AdditionalFieldsText contains "EventId=2001"
+                    or AdditionalFieldsText contains @"""EventID"":2001"
+                    or AdditionalFieldsText contains @"""EventId"":2001"
+                    or AdditionalFieldsText contains "Event ID 2001",
+                HasDefenderUpdateContext = AdditionalFieldsText has_any (
+                    "WinDefend",
+                    "Windows Defender",
+                    "Microsoft Defender",
+                    "MsMpEng",
+                    "SignatureUpdate",
+                    "Definition Updates",
+                    "Antivirus",
+                    "Engine",
+                    "Security intelligence",
+                    "PlatformVersion",
+                    "SignatureVersion"
+                )
+                or ActionType contains "Antivirus"
+                or ActionType contains "Defender"
+            | where ActionType in~ ("AntivirusDefinitionUpdateFailed", "AntivirusError", "AntivirusSignatureUpdateFailed")
+                or ActionType contains "UpdateFailed"
+                or ActionType contains "AntivirusError"
+                or AdditionalFieldsText contains "EngineUnavailable"
+                or AdditionalFieldsText contains "UpdateError"
+                or AdditionalFieldsText contains "SignatureUpdate"
+                or AdditionalFieldsText contains "Definition Updates"
+                or (HasEventId2001 and HasDefenderUpdateContext)
+            | where tolower(AdditionalFieldsText) has_any ("fail", "error", "unavailable", "stopped", "stale")
+                or ActionType contains "Failed"
+                or ActionType contains "Error"
+                or HasEventId2001
+            | project
+                DeviceId,
+                FailureTime = Timestamp,
+                FailureActionType = ActionType,
+                FailureDetails = AdditionalFieldsText,
+                FailureReportId = ReportId;
+        let VersionSignalsForHealth =
+            DeviceEvents
+            | where Timestamp >= ago(Lookback)
+            | extend AdditionalFieldsText = tostring(AdditionalFields)
+            | where AdditionalFieldsText has_any ("PlatformVersion", "SignatureVersion", "Security intelligence", "EngineVersion")
+            | summarize VersionSignals = make_set(AdditionalFieldsText, 10) by DeviceId;
+        SuspiciousAccessForHealth
+        | join kind=inner (FailureSignalsForHealth) on DeviceId
+        | where FailureTime between (SuspiciousAccessTime .. SuspiciousAccessTime + Lookback)
+        | summarize
+            Timestamp = min(SuspiciousAccessTime),
+            DeviceName = any(DeviceName),
+            ReportId = any(SuspiciousReportId),
+            ProcessName = any(SuspiciousProcess),
+            ProcessPath = any(SuspiciousProcessPath),
+            ProcessCommandLine = any(SuspiciousProcessCommandLine),
+            AccountName = any(SuspiciousAccountName),
+            AccountSid = any(SuspiciousAccountSid),
+            FirstSuspiciousAccess = min(SuspiciousAccessTime),
+            FirstFailure = min(FailureTime),
+            SuspiciousProcesses = make_set(SuspiciousProcess, 20),
+            FailureActions = make_set(FailureActionType, 20),
+            SuspiciousEvidence = make_set(SuspiciousEvidence, 20),
+            FailureDetails = make_set(FailureDetails, 20),
+            ReportRefs = make_set(strcat(tostring(SuspiciousAccessTime), ":", tostring(SuspiciousReportId)), 20),
+            FailureReportRefs = make_set(strcat(tostring(FailureTime), ":", tostring(FailureReportId)), 20)
+          by DeviceId, Bucket = bin(SuspiciousAccessTime, 10m)
+        | join kind=leftouter (VersionSignalsForHealth) on DeviceId
+        | project
+            Timestamp,
+            DeviceId,
+            DeviceName,
+            ReportId,
+            Stage = "Stage8_DefenderHealthAndSignatureStaleness",
+            StageDescription = "Suspicious Defender signature-file access followed by update, engine, or service-health degradation",
+            ProcessName,
+            ProcessPath,
+            ProcessCommandLine,
+            AccountName,
+            AccountSid,
+            Evidence = strcat("FirstSuspiciousAccess=", tostring(FirstSuspiciousAccess), " | FirstFailure=", tostring(FirstFailure)),
+            AdditionalContext = strcat(
+                "SuspiciousProcesses=", tostring(SuspiciousProcesses),
+                " | FailureActions=", tostring(FailureActions),
+                " | SuspiciousEvidence=", tostring(SuspiciousEvidence),
+                " | FailureDetails=", tostring(FailureDetails),
+                " | VersionSignals=", tostring(VersionSignals)
+            )
+    );
 let AllStages =
     materialize(
         union
@@ -257,6 +380,9 @@ let AllStages =
                     AccountSid = InitiatingProcessAccountSid,
                     Evidence = NormalizePath(FolderPath, FileName),
                     AdditionalContext = strcat("ActionType=", ActionType, " | Path=", NormalizePath(FolderPath, FileName))
+            ),
+            (
+                Stage8_DefenderHealthAndSignatureStaleness
             )
         | where isnotempty(DeviceId) and isnotempty(Timestamp)
         | extend StageTime = Timestamp
@@ -311,18 +437,22 @@ AllStages
     HasServiceMonitoring = set_has_element(Stages, "Stage4_WinDefendServiceMonitoring"),
     HasServiceStopped = set_has_element(Stages, "Stage5_WinDefendServiceStopped"),
     HasUpdateFailure = set_has_element(Stages, "Stage6_DefenderUpdateOrEngineFailure"),
-    HasMrtAccess = set_has_element(Stages, "Stage7_MrtDirectoryAccess")
+    HasMrtAccess = set_has_element(Stages, "Stage7_MrtDirectoryAccess"),
+    HasHealthAndStaleness = set_has_element(Stages, "Stage8_DefenderHealthAndSignatureStaleness")
 | extend
     HasUnDefendAnchor = HasRegistryRecon
         or HasSignatureFileAccess
         or HasDirectoryMonitoring
         or HasServiceMonitoring
         or HasMrtAccess
+        or HasHealthAndStaleness
 | where HasUnDefendAnchor
 | extend
     AlertSeverity = case(
+        HasHealthAndStaleness and (HasSignatureFileAccess or HasUpdateFailure or HasServiceStopped), "Critical",
         HasSignatureFileAccess and HasUpdateFailure, "Critical",
         HasSignatureFileAccess and HasServiceStopped, "Critical",
+        HasHealthAndStaleness, "High",
         StageCount >= 4, "High",
         HasDirectoryMonitoring and (HasUpdateFailure or HasServiceStopped), "High",
         StageCount >= 3, "Medium",

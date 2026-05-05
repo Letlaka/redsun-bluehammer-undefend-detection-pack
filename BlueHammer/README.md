@@ -8,7 +8,9 @@ The BlueHammer package contains Microsoft Defender XDR Advanced Hunting queries 
 
 The package is built as a correlation hunt. Several individual stages are intentionally weak when viewed alone, but become meaningful when they occur together on the same device within the correlation window.
 
-The research report dated April 19, 2026 maps BlueHammer to CVE-2026-33825 and notes public reporting of a Microsoft Defender Antimalware Platform fix at version 4.18.26050.3011. These queries are still behavior and telemetry hunts; they do not replace patch verification.
+Source review verified on 2026-05-05 maps BlueHammer to CVE-2026-33825. NVD affected-platform data and Microsoft Defender release notes identify Microsoft Defender Antimalware Platform versions before 4.18.26030.3011 as affected. These queries are still behavior and telemetry hunts; they do not replace patch verification.
+
+For tenant-specific platform exposure reporting, use `Exposure/01_bluehammer_defender_platform_exposure.kql` as a template and replace its placeholder inventory source with a tenant-verified Defender platform version feed.
 
 ## File Layout
 
@@ -31,6 +33,7 @@ The research report dated April 19, 2026 maps BlueHammer to CVE-2026-33825 and n
 | `15_bluehammer_stage6a_guid_named_service_installed.kql` | Stage 6a: service installed with GUID-shaped service name. |
 | `16_bluehammer_stage6b_nonstandard_conhost_spawn.kql` | Stage 6b: `conhost.exe` spawned from a non-standard parent chain. |
 | `17_bluehammer_stage7_microsoft_detection_name.kql` | Stage 7: Microsoft Defender BlueHammer detection-name telemetry. |
+| `production/bluehammer_conservative_custom_detection.kql` | Conservative scheduled-detection candidate derived from the main hunting query. |
 
 ## Main Query Behavior
 
@@ -248,7 +251,7 @@ Tuning notes:
 
 ### Stage 7: Microsoft Detection Name
 
-Detects Microsoft Defender antivirus telemetry that contains BlueHammer-associated detection names or stable substrings such as `Behavior:Win32/CVE-2026-33825.Z!MTB`, `Exploit:Win32/DfndrPEBluHmr.BB`, `CVE-2026-33825`, or `DfndrPEBluHmr`.
+Detects Microsoft Defender antivirus telemetry that contains BlueHammer-associated detection names or stable substrings such as `Behavior:Win32/CVE-2026-33825.Z!MTB`, `Exploit:Win32/DfndrPEBluHmr.BB`, `Exploit:Win32/DfndrPEBluHmr.BZ`, `CVE-2026-33825`, or `DfndrPEBluHmr`.
 
 Primary table:
 
@@ -257,6 +260,7 @@ Primary table:
 Why it matters:
 
 - This is high-signal vendor detection telemetry and is treated as `Critical` by the full-chain query even if no other stage is visible.
+- The exact `Exploit:Win32/DfndrPEBluHmr.BZ` name is retained for source traceability, while the broader `DfndrPEBluHmr` substring continues to catch related family names.
 
 ## Anchor Logic
 
@@ -298,7 +302,9 @@ Potential benign sources include:
 
 ## Production Deployment Guidance
 
-Use standalone queries for baselining first. For production alerting, consider requiring one of:
+Use standalone queries for baselining first. For scheduled custom detection work, start from `production/bluehammer_conservative_custom_detection.kql` and keep `01_bluehammer_full_attack_chain.kql` as the broader hunting query.
+
+When tuning the production variant, consider requiring one of:
 
 - VSS hive read plus any other stage.
 - LSA boot-key read plus any other stage.

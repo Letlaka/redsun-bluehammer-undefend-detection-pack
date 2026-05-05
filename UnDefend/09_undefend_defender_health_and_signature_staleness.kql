@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+// DetectionMetadata:
+//   Family: UnDefend
+//   QueryType: Hunting
+//   Severity: High
+//   Confidence: Medium
+//   DataSources: DeviceEvents, DeviceFileEvents
+//   ATTACK: T1562.001,T1112,T1007,T1083
+//   SourceRefs: SOURCES.md#undefend
+//   ProductionReady: No
+//   LastVerified: 2026-05-05
+
+// Purpose:
+//   Standalone UnDefend Stage 8 hunt from 01_undefend_full_attack_chain.kql.
+//   Correlates suspicious Defender signature-file access with follow-on update,
+//   engine, or service-health degradation and surfaces any version context that
+//   appears in tenant telemetry.
+//
+// Notes:
+//   This query is still hunting-focused. Some tenants do not expose Defender
+//   platform or signature version fields directly in Advanced Hunting. When
+//   those fields are unavailable, rely on the suspicious access and failure
+//   correlation and supplement with tenant-verified inventory.
+
+let Lookback = 24h;
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+let IsTrustedDefenderPath = (Path:string) {
+    tolower(Path) startswith @"c:\programdata\microsoft\windows defender\"
+    or tolower(Path) startswith @"c:\program files\windows defender\"
+    or tolower(Path) startswith @"c:\program files\microsoft defender\"
+    or tolower(Path) startswith @"c:\program files\windows defender advanced threat protection\"
+};
+let IsDefenderDefinitionPath = (Path:string) {
+    tolower(Path) contains @"\programdata\microsoft\windows defender\definition updates"
+    or tolower(Path) contains @"\windows defender\definition updates"
+};
+let SignatureFiles = dynamic([
+    "mpavbase.vdm", "mpavbase.lkg", "mpasbase.vdm", "mpasbase.lkg",
+    "mpavdlta.vdm", "mpasdlta.vdm"
+]);
+let TrustedDefenderProcesses = dynamic([
+    "MsMpEng.exe", "MpCmdRun.exe", "NisSrv.exe", "SecurityHealthService.exe",
+    "MpDlpCmd.exe", "ConfigSecurityPolicy.exe", "MpSigStub.exe", "MRT.exe",
+    "TiWorker.exe", "TrustedInstaller.exe", "svchost.exe", "wuauclt.exe",
+    "UsoClient.exe", "MoUsoCoreWorker.exe"
+]);
+let SuspiciousAccess =
+    DeviceFileEvents
+    | where Timestamp >= ago(Lookback)
+    | where ActionType in~ ("FileAccessed", "FileRead", "FileOpened", "FileModified")
+    | where FileName in~ (SignatureFiles)
+    | where IsDefenderDefinitionPath(FolderPath)
+    | where InitiatingProcessFileName !in~ (TrustedDefenderProcesses)
+    | where not(IsTrustedDefenderPath(InitiatingProcessFolderPath))
+    | project
+        DeviceId,
+        DeviceName,
+        SuspiciousAccessTime = Timestamp,
+        SuspiciousProcess = InitiatingProcessFileName,
+        SuspiciousProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        SuspiciousProcessCommandLine = InitiatingProcessCommandLine,
+        SuspiciousAccountName = InitiatingProcessAccountName,
+        SuspiciousAccountSid = InitiatingProcessAccountSid,
+        SuspiciousEvidence = NormalizePath(FolderPath, FileName),
+        SuspiciousReportId = ReportId;
+let FailureEvents =
+    DeviceEvents
+    | where Timestamp >= ago(Lookback)
+    | extend AdditionalFieldsText = tostring(AdditionalFields)
+    | extend
+        HasEventId2001 = AdditionalFieldsText contains "EventID=2001"
+            or AdditionalFieldsText contains "EventId=2001"
+            or AdditionalFieldsText contains @"""EventID"":2001"
+            or AdditionalFieldsText contains @"""EventId"":2001"
+            or AdditionalFieldsText contains "Event ID 2001",
+        HasDefenderUpdateContext = AdditionalFieldsText has_any (
+            "WinDefend",
+            "Windows Defender",
+            "Microsoft Defender",
+            "MsMpEng",
+            "SignatureUpdate",
+            "Definition Updates",
+            "Antivirus",
+            "Engine",
+            "Security intelligence",
+            "PlatformVersion",
+            "SignatureVersion"
+        )
+        or ActionType contains "Antivirus"
+        or ActionType contains "Defender"
+    | where ActionType in~ ("AntivirusDefinitionUpdateFailed", "AntivirusError", "AntivirusSignatureUpdateFailed")
+        or ActionType contains "UpdateFailed"
+        or ActionType contains "AntivirusError"
+        or AdditionalFieldsText contains "EngineUnavailable"
+        or AdditionalFieldsText contains "UpdateError"
+        or AdditionalFieldsText contains "SignatureUpdate"
+        or AdditionalFieldsText contains "Definition Updates"
+        or (HasEventId2001 and HasDefenderUpdateContext)
+    | where tolower(AdditionalFieldsText) has_any ("fail", "error", "unavailable", "stopped", "stale")
+        or ActionType contains "Failed"
+        or ActionType contains "Error"
+        or HasEventId2001
+    | project
+        DeviceId,
+        FailureTime = Timestamp,
+        FailureActionType = ActionType,
+        FailureDetails = AdditionalFieldsText,
+        FailureProcess = InitiatingProcessFileName,
+        FailureProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+        FailureReportId = ReportId;
+let VersionSignals =
+    DeviceEvents
+    | where Timestamp >= ago(Lookback)
+    | extend AdditionalFieldsText = tostring(AdditionalFields)
+    | where AdditionalFieldsText has_any ("PlatformVersion", "SignatureVersion", "Security intelligence", "EngineVersion")
+    | project
+        DeviceId,
+        VersionSignal = AdditionalFieldsText;
+SuspiciousAccess
+| join kind=inner (FailureEvents) on DeviceId
+| where FailureTime between (SuspiciousAccessTime .. SuspiciousAccessTime + Lookback)
+| summarize
+    Timestamp = min(SuspiciousAccessTime),
+    DeviceName = any(DeviceName),
+    FirstSuspiciousAccess = min(SuspiciousAccessTime),
+    FirstFailure = min(FailureTime),
+    SuspiciousProcesses = make_set(SuspiciousProcess, 20),
+    SuspiciousProcessPaths = make_set(SuspiciousProcessPath, 20),
+    SuspiciousProcessCommandLines = make_set(SuspiciousProcessCommandLine, 20),
+    FailureEvents = make_set(FailureActionType, 20),
+    FailureDetails = make_set(FailureDetails, 20),
+    SuspiciousEvidence = make_set(SuspiciousEvidence, 20),
+    Accounts = make_set(SuspiciousAccountName, 20),
+    AccountSids = make_set(SuspiciousAccountSid, 20),
+    ReportRefs = make_set(strcat(tostring(SuspiciousAccessTime), ":", tostring(SuspiciousReportId)), 20),
+    FailureReportRefs = make_set(strcat(tostring(FailureTime), ":", tostring(FailureReportId)), 20)
+  by DeviceId, Bucket = bin(SuspiciousAccessTime, 10m)
+| join kind=leftouter (
+    VersionSignals
+    | summarize VersionSignals = make_set(VersionSignal, 10) by DeviceId
+) on DeviceId
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId = strcat("Stage8:", tostring(Bucket)),
+    Stage = "Stage8_DefenderHealthAndSignatureStaleness",
+    StageDescription = "Suspicious Defender signature-file access followed by update, engine, or service-health degradation",
+    ProcessName = iff(array_length(SuspiciousProcesses) > 0, tostring(SuspiciousProcesses[0]), ""),
+    ProcessPath = iff(array_length(SuspiciousProcessPaths) > 0, tostring(SuspiciousProcessPaths[0]), ""),
+    ProcessCommandLine = iff(array_length(SuspiciousProcessCommandLines) > 0, tostring(SuspiciousProcessCommandLines[0]), ""),
+    AccountName = iff(array_length(Accounts) > 0, tostring(Accounts[0]), ""),
+    AccountSid = iff(array_length(AccountSids) > 0, tostring(AccountSids[0]), ""),
+    Evidence = strcat("FirstSuspiciousAccess=", tostring(FirstSuspiciousAccess), " | FirstFailure=", tostring(FirstFailure)),
+    AdditionalContext = strcat(
+        "SuspiciousProcesses=", tostring(SuspiciousProcesses),
+        " | FailureEvents=", tostring(FailureEvents),
+        " | VersionSignals=", tostring(VersionSignals),
+        " | RecommendedAction=Validate Defender health, update history, platform version, signature freshness, and local WinDefend status"
+    ),
+    FirstSuspiciousAccess,
+    FirstFailure,
+    SuspiciousProcesses,
+    FailureEvents,
+    RecommendedAction = "Validate Defender health, update history, platform version, signature freshness, and local WinDefend status"
+| order by Timestamp desc
