@@ -165,7 +165,7 @@ let Stage8_DefenderHealthAndSignatureStaleness =
             | summarize VersionSignals = make_set(AdditionalFieldsText, 10) by DeviceId;
         SuspiciousAccessForHealth
         | join kind=inner (FailureSignalsForHealth) on DeviceId
-        | where FailureTime between (SuspiciousAccessTime .. SuspiciousAccessTime + Lookback)
+        | where FailureTime between (SuspiciousAccessTime .. SuspiciousAccessTime + CorrelationWindow)
         | summarize
             Timestamp = min(SuspiciousAccessTime),
             DeviceName = any(DeviceName),
@@ -183,7 +183,7 @@ let Stage8_DefenderHealthAndSignatureStaleness =
             FailureDetails = make_set(FailureDetails, 20),
             ReportRefs = make_set(strcat(tostring(SuspiciousAccessTime), ":", tostring(SuspiciousReportId)), 20),
             FailureReportRefs = make_set(strcat(tostring(FailureTime), ":", tostring(FailureReportId)), 20)
-          by DeviceId, Bucket = bin(SuspiciousAccessTime, 10m)
+          by DeviceId, Bucket = bin(SuspiciousAccessTime, CorrelationStep)
         | join kind=leftouter (VersionSignalsForHealth) on DeviceId
         | project
             Timestamp,
