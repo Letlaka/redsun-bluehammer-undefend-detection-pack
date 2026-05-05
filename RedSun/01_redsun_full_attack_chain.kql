@@ -7,7 +7,7 @@
 //   Severity: High
 //   Confidence: Medium
 //   DataSources: DeviceEvents, DeviceFileEvents, DeviceImageLoadEvents, DeviceProcessEvents, DeviceRegistryEvents
-//   ATTACK: T1068,T1574.010,T1055
+//   ATTACK: T1068,T1574.010,T1543.003
 //   SourceRefs: SOURCES.md#redsun
 //   ProductionReady: No
 //   LastVerified: 2026-05-05
@@ -392,7 +392,7 @@ AllStages
                     "High",
                     "Medium"
                 ),
-    TTP = "T1068,T1574.010,T1055,T1543.003",
+    TTP = "T1068,T1574.010,T1543.003,T1543.003",
     DetectionReason = "Possible RedSun attack chain: correlated Cloud Files, Storage Tiers COM, reparse/oplock, Defender write, SYSTEM execution, or Microsoft detection-name telemetry within 60 minutes"
 | project-reorder
     AlertSeverity,

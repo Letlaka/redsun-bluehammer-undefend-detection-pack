@@ -7,7 +7,7 @@
 //   Severity: High
 //   Confidence: High
 //   DataSources: DeviceEvents, DeviceFileEvents, DeviceProcessEvents, DeviceRegistryEvents
-//   ATTACK: T1562.001,T1112,T1007,T1083
+//   ATTACK: T1562.001,T1012,T1007,T1083
 //   SourceRefs: SOURCES.md#undefend
 //   ProductionReady: Yes
 //   LastVerified: 2026-05-05

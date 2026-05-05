@@ -912,7 +912,7 @@ SOURCES.md#bluehammer
 SOURCES.md#redsun
 SOURCES.md#undefend
 SOURCES.md#crossfamily
-SOURCES.md#external-telemetry
+SOURCES.md#externaltelemetry
 ```
 
 ---
