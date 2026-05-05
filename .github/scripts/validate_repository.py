@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lightweight repository validation for detection-pack pull requests."""
+"""Repository validation for detection-pack pull requests."""
 
 from __future__ import annotations
 
@@ -9,12 +9,63 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DETECTION_DIRS = ("RedSun", "BlueHammer", "UnDefend")
+DETECTION_DIRS = ("RedSun", "BlueHammer", "UnDefend", "CrossFamily")
+SUPPORT_QUERY_DIRS = ("Exposure",)
+REQUIRED_SUPPORT_FILES = (
+    ROOT / "SOURCES.md",
+    ROOT / "IOCS.md",
+    ROOT / "MITIGATIONS.md",
+    ROOT / "ATTACK_MAPPING.md",
+    ROOT / "DEPLOYMENT_GUIDE.md",
+    ROOT / "ExternalTelemetry" / "README.md",
+)
 REQUIRED_KQL_HEADER = (
     "// SPDX-License-Identifier: Apache-2.0",
     "// Copyright 2026 Letlaka",
     "// AI-generated detection content. Review, test, tune, and verify before production use.",
 )
+REQUIRED_METADATA_KEYS = {
+    "Family",
+    "QueryType",
+    "Severity",
+    "Confidence",
+    "DataSources",
+    "ATTACK",
+    "SourceRefs",
+    "ProductionReady",
+    "LastVerified",
+}
+ALLOWED_METADATA_VALUES = {
+    "QueryType": {"Hunting", "Exposure", "Production", "Triage", "ExternalCorrelation"},
+    "Severity": {"Informational", "Low", "Medium", "High", "Critical"},
+    "Confidence": {"Low", "Medium", "High"},
+    "ProductionReady": {"Yes", "No"},
+}
+KNOWN_SOURCE_REFS = {
+    "SOURCES.md#bluehammer",
+    "SOURCES.md#redsun",
+    "SOURCES.md#undefend",
+    "SOURCES.md#crossfamily",
+    "SOURCES.md#externaltelemetry",
+}
+FORBIDDEN_FIXED_VERSION = "4.18.26050.3011"
+FORBIDDEN_VERSION_EXEMPTIONS = {
+    ROOT / "CHANGELOG.md",
+    ROOT / "SOURCES.md",
+    ROOT / ".github" / "scripts" / "validate_repository.py",
+    ROOT / "refined_redsun_bluehammer_undefend_upgrade_plan.md",
+}
+IOC_STRINGS = {
+    "Exploit:Win32/DfndrPEBluHmr.BZ",
+    "FunnyApp.exe",
+    "RedSun.exe",
+    "undef.exe",
+    "z.exe",
+    "staybud.dpdns.org",
+    "a2b6c7a9c4490df70de3cdbfa5fc801a3e1cf6a872749259487e354de2876b7c",
+}
+FILENAME_ONLY_IOCS = {"FunnyApp.exe", "RedSun.exe", "undef.exe", "z.exe"}
+KQL_DATA_SOURCE_PATTERN = re.compile(r"\b(Device(?:Events|ProcessEvents|FileEvents|ImageLoadEvents|RegistryEvents|NetworkEvents))\b")
 STAGE_PATTERN = re.compile(r'\bStage\s*=\s*"([^"]+)"')
 
 
@@ -112,6 +163,59 @@ def validate_balanced_delimiters(path: Path, text: str, errors: list[str]) -> No
         add_error(errors, path, f"unclosed `{char}` from line {start_line}, column {start_column}")
 
 
+def parse_metadata(lines: list[str]) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    if len(lines) <= 3 or lines[3] != "// DetectionMetadata:":
+        return metadata
+
+    index = 4
+    while index < len(lines) and lines[index].startswith("//   "):
+        payload = lines[index][5:]
+        if ":" in payload:
+            key, value = payload.split(":", 1)
+            metadata[key.strip()] = value.strip()
+        index += 1
+    return metadata
+
+
+def validate_metadata(path: Path, text: str, errors: list[str]) -> None:
+    lines = text.splitlines()
+
+    metadata = parse_metadata(lines)
+    if not metadata:
+        add_error(errors, path, "missing `// DetectionMetadata:` block")
+        return
+
+    missing_keys = sorted(REQUIRED_METADATA_KEYS - set(metadata))
+    if missing_keys:
+        add_error(errors, path, f"metadata block missing required keys: {missing_keys}")
+
+    for key, allowed_values in ALLOWED_METADATA_VALUES.items():
+        value = metadata.get(key)
+        if value and value not in allowed_values:
+            add_error(errors, path, f"metadata key `{key}` has invalid value `{value}`")
+
+    source_ref = metadata.get("SourceRefs")
+    if source_ref and source_ref not in KNOWN_SOURCE_REFS:
+        add_error(errors, path, f"metadata SourceRefs `{source_ref}` is not an approved anchor")
+
+    in_production_dir = "production" in path.parts
+    query_type = metadata.get("QueryType")
+    production_ready = metadata.get("ProductionReady")
+
+    if production_ready == "Yes" and not in_production_dir:
+        add_error(errors, path, "ProductionReady: Yes must live under a `production/` directory")
+    if query_type == "Hunting" and in_production_dir:
+        add_error(errors, path, "QueryType: Hunting is not allowed inside a `production/` directory")
+    if query_type == "Production" and not in_production_dir:
+        add_error(errors, path, "QueryType: Production must live under a `production/` directory")
+    if path.parts[0] == "Exposure" and query_type != "Exposure":
+        add_error(errors, path, "queries under `Exposure/` must use QueryType: Exposure")
+
+    if any(ioc in text for ioc in FILENAME_ONLY_IOCS) and metadata.get("Severity") == "Critical":
+        add_error(errors, path, "filename-only IOC queries must not declare `Severity: Critical` in metadata")
+
+
 def validate_kql_file(path: Path, errors: list[str]) -> None:
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
@@ -122,6 +226,7 @@ def validate_kql_file(path: Path, errors: list[str]) -> None:
     if "let Lookback =" not in text:
         add_error(errors, path, "missing `let Lookback =` declaration")
 
+    validate_metadata(path, text, errors)
     validate_balanced_delimiters(path, text, errors)
 
 
@@ -189,7 +294,6 @@ def validate_detection_dir(directory: Path, errors: list[str]) -> None:
             add_error(errors, file_path, "KQL filename must start with a two-digit sequence number")
             continue
         numbers.append(int(match.group(1)))
-        validate_kql_file(file_path, errors)
 
     expected_numbers = list(range(1, len(kql_files) + 1))
     if numbers != expected_numbers:
@@ -204,14 +308,127 @@ def validate_detection_dir(directory: Path, errors: list[str]) -> None:
         add_error(errors, kql_files[0], "first query must be the full attack-chain query")
 
     validate_stage_alignment(kql_files[0], kql_files[1:], errors)
+    production_files = sorted((directory / "production").glob("*.kql"))
+    validate_readme_coverage(readme, kql_files + production_files, errors)
+
+
+def validate_support_query_dir(directory: Path, errors: list[str]) -> None:
+    if not directory.is_dir():
+        add_error(errors, directory, "missing support query directory")
+        return
+
+    readme = directory / "README.md"
+    if not readme.is_file():
+        add_error(errors, readme, "missing directory README")
+
+    kql_files = sorted(directory.glob("*.kql"))
+    if not kql_files:
+        add_error(errors, directory, "no KQL files found")
+        return
+
+    numbers: list[int] = []
+    for file_path in kql_files:
+        match = re.fullmatch(r"(\d{2})_.+\.kql", file_path.name)
+        if not match:
+            add_error(errors, file_path, "KQL filename must start with a two-digit sequence number")
+            continue
+        numbers.append(int(match.group(1)))
+
+    expected_numbers = list(range(1, len(kql_files) + 1))
+    if numbers != expected_numbers:
+        add_error(
+            errors,
+            directory,
+            f"KQL numbering must be contiguous from 01; found {numbers}, expected {expected_numbers}",
+        )
+
     validate_readme_coverage(readme, kql_files, errors)
+
+
+def validate_support_docs(errors: list[str]) -> None:
+    for path in REQUIRED_SUPPORT_FILES:
+        if not path.is_file():
+            add_error(errors, path, "required support file is missing")
+
+
+def validate_forbidden_fixed_version(errors: list[str]) -> None:
+    candidate_files = [
+        path
+        for path in ROOT.rglob("*")
+        if path.is_file()
+        and ".git" not in path.parts
+        and ".mypy_cache" not in path.parts
+        and path not in FORBIDDEN_VERSION_EXEMPTIONS
+        and path.suffix in {".md", ".kql", ".py", ".yml"}
+    ]
+
+    for path in candidate_files:
+        text = path.read_text(encoding="utf-8")
+        if FORBIDDEN_FIXED_VERSION in text:
+            add_error(errors, path, f"contains forbidden fixed-version baseline `{FORBIDDEN_FIXED_VERSION}`")
+
+
+def validate_ioc_sources(errors: list[str]) -> None:
+    sources_path = ROOT / "SOURCES.md"
+    iocs_path = ROOT / "IOCS.md"
+
+    if not sources_path.is_file() or not iocs_path.is_file():
+        return
+
+    try:
+        sources_text = sources_path.read_text(encoding="utf-8")
+        iocs_text = iocs_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        add_error(errors, sources_path, f"unable to read IOC support files: {exc}")
+        return
+
+    reference_text = "\n".join((sources_text, iocs_text))
+
+    for ioc in sorted(IOC_STRINGS):
+        if ioc not in reference_text:
+            add_error(errors, sources_path, f"IOC `{ioc}` is missing from SOURCES.md and IOCS.md")
+
+    for kql_path in ROOT.rglob("*.kql"):
+        text = kql_path.read_text(encoding="utf-8")
+        if any(ioc in text for ioc in IOC_STRINGS):
+            metadata = parse_metadata(text.splitlines())
+            if not metadata.get("SourceRefs"):
+                add_error(errors, kql_path, "IOC-bearing query is missing metadata SourceRefs")
+
+
+def validate_kql_datasources(errors: list[str]) -> None:
+    for kql_path in ROOT.rglob("*.kql"):
+        text = kql_path.read_text(encoding="utf-8")
+        metadata = parse_metadata(text.splitlines())
+        declared_sources = metadata.get("DataSources", "")
+        if declared_sources == "TenantVerifiedInventory":
+            continue
+        discovered_sources = sorted(set(KQL_DATA_SOURCE_PATTERN.findall(text)))
+        if discovered_sources and any(source not in declared_sources for source in discovered_sources):
+            add_error(
+                errors,
+                kql_path,
+                f"metadata DataSources does not cover all discovered tables: {discovered_sources}",
+            )
 
 
 def main() -> int:
     errors: list[str] = []
 
+    validate_support_docs(errors)
+    validate_forbidden_fixed_version(errors)
+    validate_ioc_sources(errors)
+
+    for kql_path in ROOT.rglob("*.kql"):
+        validate_kql_file(kql_path, errors)
+
     for directory_name in DETECTION_DIRS:
         validate_detection_dir(ROOT / directory_name, errors)
+
+    for directory_name in SUPPORT_QUERY_DIRS:
+        validate_support_query_dir(ROOT / directory_name, errors)
+
+    validate_kql_datasources(errors)
 
     if errors:
         print("Repository validation failed:")

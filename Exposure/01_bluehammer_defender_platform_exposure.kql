@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+// DetectionMetadata:
+//   Family: BlueHammer
+//   QueryType: Exposure
+//   Severity: Medium
+//   Confidence: Medium
+//   DataSources: TenantVerifiedInventory
+//   ATTACK: T1068,T1003.002,T1543.003
+//   SourceRefs: SOURCES.md#bluehammer
+//   ProductionReady: No
+//   LastVerified: 2026-05-05
+
+// Purpose:
+//   Template exposure query for BlueHammer platform-version reporting.
+//   Replace the placeholder SourceTable with a tenant-verified Defender
+//   platform inventory source before operational use.
+//
+// Notes:
+//   This is not exploit detection. Missing or stale platform-version data
+//   must be treated as Unknown rather than Patched.
+
+let Lookback = 7d;
+let RequiredMajor = 4;
+let RequiredMinor = 18;
+let RequiredBuild = 26030;
+let RequiredRevision = 3011;
+// Replace SourceTable and AvPlatformVersion with the tenant-verified platform
+// inventory source. Examples include custom inventory ingestion, Intune
+// exports, or Defender health telemetry that reliably exposes platform version.
+let SourceTable = datatable(DeviceName:string, DeviceId:string, Timestamp:datetime, AvPlatformVersion:string)
+[
+];
+SourceTable
+| where Timestamp >= ago(Lookback)
+| extend VersionParts = split(AvPlatformVersion, ".")
+| extend
+    VersionMajor = toint(iff(array_length(VersionParts) > 0, tostring(VersionParts[0]), "")),
+    VersionMinor = toint(iff(array_length(VersionParts) > 1, tostring(VersionParts[1]), "")),
+    VersionBuild = toint(iff(array_length(VersionParts) > 2, tostring(VersionParts[2]), "")),
+    VersionRevision = toint(iff(array_length(VersionParts) > 3, tostring(VersionParts[3]), ""))
+| extend HasParsableVersion = isnotnull(VersionMajor) and isnotnull(VersionMinor) and isnotnull(VersionBuild) and isnotnull(VersionRevision)
+| extend ExposureStatus = case(
+    isempty(AvPlatformVersion) or not(HasParsableVersion), "Unknown",
+    VersionMajor > RequiredMajor, "Patched",
+    VersionMajor < RequiredMajor, "Exposed",
+    VersionMinor > RequiredMinor, "Patched",
+    VersionMinor < RequiredMinor, "Exposed",
+    VersionBuild > RequiredBuild, "Patched",
+    VersionBuild < RequiredBuild, "Exposed",
+    VersionRevision >= RequiredRevision, "Patched",
+    "Exposed"
+)
+| project
+    DeviceName,
+    DeviceId,
+    AvPlatformVersion,
+    RequiredPlatformVersion = "4.18.26030.3011",
+    ExposureStatus,
+    RecommendedAction = case(
+        ExposureStatus == "Exposed", "Upgrade Microsoft Defender Antimalware Platform to 4.18.26030.3011 or later and verify tenant inventory freshness.",
+        ExposureStatus == "Unknown", "Verify the tenant-specific platform version source and treat the endpoint as unknown until inventory is confirmed.",
+        "No action required beyond normal verification of Defender platform inventory."
+    ),
+    SourceRefs = "SOURCES.md#bluehammer"
+| order by DeviceName asc

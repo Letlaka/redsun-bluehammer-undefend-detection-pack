@@ -1,0 +1,362 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+// DetectionMetadata:
+//   Family: CrossFamily
+//   QueryType: Hunting
+//   Severity: High
+//   Confidence: Medium
+//   DataSources: DeviceEvents, DeviceFileEvents, DeviceNetworkEvents, DeviceProcessEvents
+//   ATTACK: T1033,T1036,T1087,T1090,T1572
+//   SourceRefs: SOURCES.md#crossfamily
+//   ProductionReady: No
+//   LastVerified: 2026-05-05
+
+// Purpose:
+//   Main CrossFamily composite runner for standalone 02-04 stage hunts.
+//   Correlates suspicious-path tooling execution, BeigeBurrow follow-on activity,
+//   and recon commands near suspicious tooling documented in public intrusion reporting.
+//
+// Notes:
+//   This package is hunting-first. Filename-only matches are renameable, VPN IPs stay
+//   documentation-only, and the exact BeigeBurrow command line or SHA-256 evidence is
+//   treated as stronger than loose agent.exe patterns.
+
+let Lookback = 4h;
+let CorrelationWindow = 30m;
+let ToolingNames = dynamic(["FunnyApp.exe", "RedSun.exe", "undef.exe", "z.exe"]);
+let BeigeBurrowSha256 = "a2b6c7a9c4490df70de3cdbfa5fc801a3e1cf6a872749259487e354de2876b7c";
+let BeigeBurrowDomain = "staybud.dpdns.org";
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+let IsSuspiciousUserWritablePath = (Path:string) {
+    tolower(Path) contains @"\users\"
+    or tolower(Path) contains @"\downloads\"
+    or tolower(Path) contains @"\pictures\"
+    or tolower(Path) contains @"\appdata\local\temp\"
+    or tolower(Path) contains @"\windows\temp\"
+    or tolower(Path) startswith @"c:\temp\"
+};
+let NearbyDetectionContext =
+    DeviceEvents
+    | where Timestamp >= ago(Lookback)
+    | extend AdditionalFieldsText = tostring(AdditionalFields)
+    | where (ActionType == "AntivirusDetection" or ActionType contains "Antivirus")
+        and (
+            AdditionalFieldsText contains "Exploit:Win32/DfndrPEBluHmr.BZ"
+            or AdditionalFieldsText has "EICAR"
+        )
+    | extend ContextType = case(
+        AdditionalFieldsText contains "Exploit:Win32/DfndrPEBluHmr.BZ", "BlueHammerVendorDetection",
+        "EicarDetection"
+    )
+    | project
+        DeviceId,
+        ContextTime = Timestamp,
+        ContextType,
+        ContextEvidence = AdditionalFieldsText;
+let Stage1_ObservedToolingExecution =
+    DeviceProcessEvents
+    | where Timestamp >= ago(Lookback)
+    | where FileName in~ (ToolingNames)
+    | extend ProcessPath = NormalizePath(FolderPath, FileName)
+    | where IsSuspiciousUserWritablePath(ProcessPath)
+    | extend ToolingMode = case(
+        tolower(ProcessCommandLine) contains "undef.exe -aggressive", "AggressiveMode",
+        tolower(ProcessCommandLine) contains "undef.exe -agressive", "AggressiveModeTypo",
+        "StandardMode"
+    )
+    | join kind=leftouter (NearbyDetectionContext) on DeviceId
+    | extend IsNearbyContext = isnotnull(ContextTime) and Timestamp between (ContextTime - 30m .. ContextTime + 30m)
+    | summarize
+        Timestamp = min(Timestamp),
+        DeviceName = any(DeviceName),
+        ReportId = any(ReportId),
+        ProcessCommandLine = any(ProcessCommandLine),
+        AccountName = any(AccountName),
+        AccountSid = any(AccountSid),
+        ParentFileName = any(InitiatingProcessFileName),
+        ParentCommandLine = any(InitiatingProcessCommandLine),
+        ToolingModes = make_set(ToolingMode, 5),
+        NearbyContextTypes = make_set_if(ContextType, IsNearbyContext, 5),
+        NearbyContextEvidence = make_set_if(ContextEvidence, IsNearbyContext, 5)
+      by DeviceId, ProcessName = FileName, ProcessPath
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage1_ObservedToolingExecution",
+        StageDescription = "Observed intrusion-tool filename executed from a suspicious user-writable path",
+        ProcessName = FileName,
+        ProcessPath,
+        ProcessCommandLine,
+        AccountName,
+        AccountSid,
+        Evidence = ProcessPath,
+        AdditionalContext = strcat(
+            "Parent=", ParentFileName,
+            " | ParentCommandLine=", ParentCommandLine,
+            " | ToolingModes=", tostring(ToolingModes),
+            " | NearbyContextTypes=", tostring(NearbyContextTypes),
+            " | NearbyContextEvidence=", tostring(NearbyContextEvidence),
+            " | Note=Filename-only matches are renameable and require analyst validation"
+        );
+let Stage2_BeigeBurrowTunnelActivity =
+    union
+        (
+            DeviceProcessEvents
+            | where Timestamp >= ago(Lookback)
+            | where FileName =~ "agent.exe"
+            | extend CommandLineLower = tolower(ProcessCommandLine)
+            | where CommandLineLower contains BeigeBurrowDomain
+                or (CommandLineLower contains "-server" and CommandLineLower contains "-hide")
+            | extend MatchType = case(
+                CommandLineLower contains "-server staybud.dpdns.org:443 -hide", "ExactCommandLine",
+                CommandLineLower contains BeigeBurrowDomain, "DomainInCommandLine",
+                "LooseAgentServerHide"
+            )
+            | project
+                Timestamp,
+                DeviceId,
+                DeviceName,
+                ReportId,
+                Stage = "Stage2_BeigeBurrowTunnelActivity",
+                StageDescription = "BeigeBurrow follow-on tunnel activity observed",
+                ProcessName = FileName,
+                ProcessPath = NormalizePath(FolderPath, FileName),
+                ProcessCommandLine,
+                AccountName,
+                AccountSid,
+                Evidence = ProcessCommandLine,
+                AdditionalContext = strcat("EvidenceType=", MatchType, " | Parent=", InitiatingProcessFileName, " | ParentCommandLine=", InitiatingProcessCommandLine)
+        ),
+        (
+            DeviceNetworkEvents
+            | where Timestamp >= ago(Lookback)
+            | where RemoteUrl contains BeigeBurrowDomain
+                or InitiatingProcessCommandLine contains BeigeBurrowDomain
+            | project
+                Timestamp,
+                DeviceId,
+                DeviceName,
+                ReportId,
+                Stage = "Stage2_BeigeBurrowTunnelActivity",
+                StageDescription = "BeigeBurrow follow-on tunnel activity observed",
+                ProcessName = InitiatingProcessFileName,
+                ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                ProcessCommandLine = InitiatingProcessCommandLine,
+                AccountName = InitiatingProcessAccountName,
+                AccountSid = InitiatingProcessAccountSid,
+                Evidence = iff(isnotempty(RemoteUrl), RemoteUrl, RemoteIP),
+                AdditionalContext = strcat("EvidenceType=NetworkDomain | RemoteIP=", RemoteIP, " | RemotePort=", tostring(RemotePort), " | RemoteUrl=", RemoteUrl)
+        ),
+        (
+            DeviceFileEvents
+            | where Timestamp >= ago(Lookback)
+            | where tolower(SHA256) == BeigeBurrowSha256
+            | project
+                Timestamp,
+                DeviceId,
+                DeviceName,
+                ReportId,
+                Stage = "Stage2_BeigeBurrowTunnelActivity",
+                StageDescription = "BeigeBurrow follow-on tunnel activity observed",
+                ProcessName = InitiatingProcessFileName,
+                ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                ProcessCommandLine = InitiatingProcessCommandLine,
+                AccountName = InitiatingProcessAccountName,
+                AccountSid = InitiatingProcessAccountSid,
+                Evidence = NormalizePath(FolderPath, FileName),
+                AdditionalContext = strcat("EvidenceType=SHA256 | SHA256=", SHA256, " | FilePath=", NormalizePath(FolderPath, FileName))
+        );
+let RelevantToolingSignals =
+    union
+        (
+            Stage1_ObservedToolingExecution
+            | project
+                DeviceId,
+                ToolTime = Timestamp,
+                ToolSignal = "ObservedToolingExecution",
+                ToolEvidence = Evidence,
+                ToolContext = AdditionalContext
+        ),
+        (
+            Stage2_BeigeBurrowTunnelActivity
+            | project
+                DeviceId,
+                ToolTime = Timestamp,
+                ToolSignal = "BeigeBurrowTunnelActivity",
+                ToolEvidence = Evidence,
+                ToolContext = AdditionalContext
+        ),
+        (
+            DeviceEvents
+            | where Timestamp >= ago(Lookback)
+            | extend AdditionalFieldsText = tostring(AdditionalFields)
+            | where (ActionType == "AntivirusDetection" or ActionType contains "Antivirus")
+                and (
+                    AdditionalFieldsText contains "Exploit:Win32/DfndrPEBluHmr.BZ"
+                    or AdditionalFieldsText has "EICAR"
+                )
+            | project
+                DeviceId,
+                ToolTime = Timestamp,
+                ToolSignal = iff(AdditionalFieldsText contains "Exploit:Win32/DfndrPEBluHmr.BZ", "BlueHammerVendorDetection", "EicarDetection"),
+                ToolEvidence = AdditionalFieldsText,
+                ToolContext = AdditionalFieldsText
+        );
+let ReconSignals =
+    DeviceProcessEvents
+    | where Timestamp >= ago(Lookback)
+    | extend CommandLineLower = tolower(ProcessCommandLine)
+    | where (FileName =~ "whoami.exe" and CommandLineLower contains "whoami /priv")
+        or (FileName =~ "cmdkey.exe" and CommandLineLower contains "cmdkey /list")
+        or (FileName in~ ("net.exe", "net1.exe") and CommandLineLower contains "net group")
+    | extend ReconCommand = case(
+        FileName =~ "whoami.exe", "whoami /priv",
+        FileName =~ "cmdkey.exe", "cmdkey /list",
+        "net group"
+    )
+    | project
+        DeviceId,
+        ReconTime = Timestamp,
+        DeviceName,
+        ReconReportId = ReportId,
+        ProcessName = FileName,
+        ProcessPath = NormalizePath(FolderPath, FileName),
+        ProcessCommandLine,
+        AccountName,
+        AccountSid,
+        ReconCommand;
+let Stage3_ReconNearObservedTooling =
+    ReconSignals
+    | join kind=inner (RelevantToolingSignals) on DeviceId
+    | where ReconTime between (ToolTime - CorrelationWindow .. ToolTime + CorrelationWindow)
+    | summarize
+        Timestamp = min(ReconTime),
+        DeviceName = any(DeviceName),
+        ReportId = any(ReconReportId),
+        ProcessName = any(ProcessName),
+        ProcessPath = any(ProcessPath),
+        ProcessCommandLine = any(ProcessCommandLine),
+        AccountName = any(AccountName),
+        AccountSid = any(AccountSid),
+        ReconCommands = make_set(ReconCommand, 10),
+        NearbySignals = make_set(ToolSignal, 10),
+        NearbyEvidence = make_set(ToolEvidence, 10),
+        NearbyContexts = make_set(ToolContext, 10)
+      by DeviceId, Bucket = bin(ReconTime, 5m)
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage3_ReconNearObservedTooling",
+        StageDescription = "Recon command observed within 30 minutes before or after suspicious tooling activity",
+        ProcessName,
+        ProcessPath,
+        ProcessCommandLine,
+        AccountName,
+        AccountSid,
+        Evidence = tostring(ReconCommands),
+        AdditionalContext = strcat("NearbySignals=", tostring(NearbySignals), " | NearbyEvidence=", tostring(NearbyEvidence), " | NearbyContexts=", tostring(NearbyContexts));
+let AllStages =
+    materialize(
+        union
+            (Stage1_ObservedToolingExecution),
+            (Stage2_BeigeBurrowTunnelActivity),
+            (Stage3_ReconNearObservedTooling)
+        | where isnotempty(DeviceId) and isnotempty(Timestamp)
+        | extend StageTime = Timestamp
+    );
+AllStages
+| project AnchorDeviceId = DeviceId, AnchorTime = StageTime
+| join kind=inner (AllStages) on $left.AnchorDeviceId == $right.DeviceId
+| where StageTime between (AnchorTime .. AnchorTime + CorrelationWindow)
+| summarize
+    Stages = make_set(Stage, 8),
+    StageDetails = make_set(strcat(Stage, ": ", StageDescription), 12),
+    StageCount = dcount(Stage),
+    EventCount = count(),
+    FirstSeen = min(StageTime),
+    LastSeen = max(StageTime),
+    Processes = make_set(ProcessName, 20),
+    ProcessCommandLines = make_set(ProcessCommandLine, 20),
+    Accounts = make_set(AccountName, 20),
+    AccountSids = make_set(AccountSid, 20),
+    Evidence = make_set(Evidence, 20),
+    AdditionalContexts = make_set(AdditionalContext, 20),
+    ReportRefs = make_set(strcat(tostring(StageTime), ":", tostring(ReportId)), 40),
+    Stage1VendorDetectionCount = countif(
+        Stage == "Stage1_ObservedToolingExecution"
+            and AdditionalContext contains "BlueHammerVendorDetection"
+    ),
+    ExactBeigeBurrowCount = countif(Stage == "Stage2_BeigeBurrowTunnelActivity" and AdditionalContext contains "EvidenceType=ExactCommandLine"),
+    HashBeigeBurrowCount = countif(Stage == "Stage2_BeigeBurrowTunnelActivity" and AdditionalContext contains "EvidenceType=SHA256"),
+    DomainBeigeBurrowCount = countif(Stage == "Stage2_BeigeBurrowTunnelActivity" and (AdditionalContext contains "EvidenceType=NetworkDomain" or AdditionalContext contains "EvidenceType=DomainInCommandLine")),
+    LooseBeigeBurrowCount = countif(Stage == "Stage2_BeigeBurrowTunnelActivity" and AdditionalContext contains "EvidenceType=LooseAgentServerHide")
+  by DeviceId, DeviceName, WindowStart = AnchorTime
+| summarize arg_max(StageCount, *) by DeviceId, WindowBucket = bin(FirstSeen, 10m)
+| extend
+    HasStage1 = set_has_element(Stages, "Stage1_ObservedToolingExecution"),
+    HasStage2 = set_has_element(Stages, "Stage2_BeigeBurrowTunnelActivity"),
+    HasStage3 = set_has_element(Stages, "Stage3_ReconNearObservedTooling"),
+    HasStage2ExactOrHash = ExactBeigeBurrowCount > 0 or HashBeigeBurrowCount > 0
+| extend
+    HasStage2DomainOnly = DomainBeigeBurrowCount > 0 and not(HasStage2ExactOrHash)
+| extend
+    HasStage2LooseOnly = LooseBeigeBurrowCount > 0 and not(HasStage2ExactOrHash) and not(HasStage2DomainOnly)
+| extend
+    HasStage1VendorDetectionContext = Stage1VendorDetectionCount > 0
+| extend
+    AlertSeverity = case(
+        HasStage1 and HasStage1VendorDetectionContext, "Critical",
+        HasStage2ExactOrHash and HasStage3, "Critical",
+        HasStage2ExactOrHash, "Critical",
+        HasStage2 and HasStage3, "High",
+        HasStage1 and HasStage3, "High",
+        HasStage2DomainOnly, "High",
+        HasStage2LooseOnly, "Medium",
+        HasStage1, "Medium",
+        HasStage3, "Medium",
+        "Low"
+    ),
+    TTP = "T1033,T1036,T1059.003,T1087,T1090,T1105,T1572",
+    DetectionReason = case(
+        HasStage1 and HasStage1VendorDetectionContext, "Observed tooling execution from a suspicious path correlated with BlueHammer vendor detection context",
+        HasStage2ExactOrHash and HasStage3, "BeigeBurrow exact command-line or hash evidence correlated with nearby recon activity",
+        HasStage2ExactOrHash, "BeigeBurrow exact command-line or hash evidence observed",
+        HasStage2 and HasStage3, "BeigeBurrow-like tunnel activity correlated with nearby recon activity",
+        HasStage1 and HasStage3, "Observed tooling execution from a suspicious path correlated with nearby recon activity",
+        HasStage2DomainOnly, "BeigeBurrow domain or command-line context observed",
+        HasStage2LooseOnly, "Loose agent tunnel pattern observed; hunting validation required",
+        HasStage1, "Observed tooling filename executed from a suspicious user-writable path; hunting validation required",
+        "Recon activity occurred near suspicious tooling and warrants analyst review"
+    )
+| project-reorder
+    AlertSeverity,
+    DetectionReason,
+    FirstSeen,
+    LastSeen,
+    DeviceName,
+    DeviceId,
+    StageCount,
+    EventCount,
+    Stages,
+    StageDetails,
+    Processes,
+    ProcessCommandLines,
+    Accounts,
+    AccountSids,
+    Evidence,
+    TTP,
+    ReportRefs,
+    AdditionalContexts
+| order by StageCount desc, FirstSeen asc

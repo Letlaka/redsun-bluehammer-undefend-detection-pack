@@ -27,19 +27,31 @@ Do not submit:
 
 ## Repository Structure
 
-Each detection family is stored in its own folder:
+Full-chain detection packages are stored in these folders:
 
 - `RedSun`
 - `BlueHammer`
 - `UnDefend`
+- `CrossFamily`
 
-Each folder follows this file pattern:
+Support folders that do not follow the same full-chain pattern:
+
+- `Exposure`
+- `ExternalTelemetry`
+
+Full-chain detection packages follow this file pattern:
 
 - `01_*_full_attack_chain.kql` is the main composite query.
 - `02_*` and higher are standalone stage queries.
 - `README.md` documents the package, stages, tuning guidance, and deployment considerations.
+- `production/*.kql`, where present, contains conservative scheduled-detection candidates and must not be labeled as `QueryType: Hunting`.
 
-Numbering must be sequential inside each folder and must start at `01`.
+Support-folder expectations:
+
+- `Exposure/01_bluehammer_defender_platform_exposure.kql` is an exposure-reporting template, not a composite attack-chain hunt.
+- `ExternalTelemetry/README.md` is documentation-only and intentionally has no endpoint KQL.
+
+Numbering must be sequential inside each KQL-bearing folder and must start at `01`.
 
 ## Branch Management Strategy
 
@@ -103,6 +115,18 @@ Preferred normalized stage fields:
 - `Evidence`
 - `AdditionalContext`
 
+Required KQL metadata fields:
+
+- `Family`
+- `QueryType`
+- `Severity`
+- `Confidence`
+- `DataSources`
+- `ATTACK`
+- `SourceRefs`
+- `ProductionReady`
+- `LastVerified`
+
 ## Standalone and Full-Chain Alignment
 
 When changing a standalone query, update the corresponding stage block in the full-chain query. When changing a full-chain stage block, update the standalone query.
@@ -126,6 +150,8 @@ Before submitting a change, perform these checks:
 6. Confirm high-volume joins or summaries are bounded by time and projected columns.
 7. Confirm documentation reflects the change.
 8. Remove any sensitive data from examples, screenshots, and exported results.
+9. Confirm the `// DetectionMetadata:` block is present and accurate.
+10. Confirm `SourceRefs` points to the correct `SOURCES.md` anchor.
 
 ## Documentation Requirements
 

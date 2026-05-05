@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Letlaka
 // AI-generated detection content. Review, test, tune, and verify before production use.
+// DetectionMetadata:
+//   Family: BlueHammer
+//   QueryType: Hunting
+//   Severity: High
+//   Confidence: Medium
+//   DataSources: DeviceEvents, DeviceFileEvents, DeviceImageLoadEvents, DeviceNetworkEvents, DeviceProcessEvents, DeviceRegistryEvents
+//   ATTACK: T1068,T1003.002,T1543.003
+//   SourceRefs: SOURCES.md#bluehammer
+//   ProductionReady: No
+//   LastVerified: 2026-05-05
 
 // Purpose:
 //   Main BlueHammer composite runner for standalone 02-17 stage hunts.
@@ -464,6 +474,7 @@ let AllStages =
                     or AdditionalFieldsText contains "ThreatName"
                 | where AdditionalFieldsText contains "Behavior:Win32/CVE-2026-33825.Z!MTB"
                     or AdditionalFieldsText contains "Exploit:Win32/DfndrPEBluHmr.BB"
+                    or AdditionalFieldsText contains "Exploit:Win32/DfndrPEBluHmr.BZ"
                     or AdditionalFieldsText contains "CVE-2026-33825"
                     or AdditionalFieldsText contains "DfndrPEBluHmr"
                 | project

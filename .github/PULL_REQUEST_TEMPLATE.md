@@ -19,6 +19,8 @@ Describe what changed and why.
 - [ ] RedSun
 - [ ] BlueHammer
 - [ ] UnDefend
+- [ ] CrossFamily
+- [ ] Exposure / external telemetry
 - [ ] Repository documentation
 - [ ] GitHub templates
 

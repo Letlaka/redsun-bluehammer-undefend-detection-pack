@@ -1,0 +1,104 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+// DetectionMetadata:
+//   Family: CrossFamily
+//   QueryType: Hunting
+//   Severity: Medium
+//   Confidence: Medium
+//   DataSources: DeviceEvents, DeviceProcessEvents
+//   ATTACK: T1033,T1036,T1087,T1090,T1572
+//   SourceRefs: SOURCES.md#crossfamily
+//   ProductionReady: No
+//   LastVerified: 2026-05-05
+
+// Purpose:
+//   Standalone CrossFamily Stage 1 hunt from 01_crossfamily_full_attack_chain.kql.
+//   Finds Huntress-observed tooling filenames executed from suspicious user-writable paths.
+//
+// Notes:
+//   Filename-only matches are renameable and must not be treated as deterministic compromise proof.
+
+let Lookback = 4h;
+let ToolingNames = dynamic(["FunnyApp.exe", "RedSun.exe", "undef.exe", "z.exe"]);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+let IsSuspiciousUserWritablePath = (Path:string) {
+    tolower(Path) contains @"\users\"
+    or tolower(Path) contains @"\downloads\"
+    or tolower(Path) contains @"\pictures\"
+    or tolower(Path) contains @"\appdata\local\temp\"
+    or tolower(Path) contains @"\windows\temp\"
+    or tolower(Path) startswith @"c:\temp\"
+};
+let NearbyDetectionContext =
+    DeviceEvents
+    | where Timestamp >= ago(Lookback)
+    | extend AdditionalFieldsText = tostring(AdditionalFields)
+    | where (ActionType == "AntivirusDetection" or ActionType contains "Antivirus")
+        and (
+            AdditionalFieldsText contains "Exploit:Win32/DfndrPEBluHmr.BZ"
+            or AdditionalFieldsText has "EICAR"
+        )
+    | extend ContextType = case(
+        AdditionalFieldsText contains "Exploit:Win32/DfndrPEBluHmr.BZ", "BlueHammerVendorDetection",
+        "EicarDetection"
+    )
+    | project
+        DeviceId,
+        ContextTime = Timestamp,
+        ContextType,
+        ContextEvidence = AdditionalFieldsText;
+DeviceProcessEvents
+| where Timestamp >= ago(Lookback)
+| where FileName in~ (ToolingNames)
+| extend ProcessPath = NormalizePath(FolderPath, FileName)
+| where IsSuspiciousUserWritablePath(ProcessPath)
+| extend ToolingMode = case(
+    tolower(ProcessCommandLine) contains "undef.exe -aggressive", "AggressiveMode",
+    tolower(ProcessCommandLine) contains "undef.exe -agressive", "AggressiveModeTypo",
+    "StandardMode"
+)
+| join kind=leftouter (NearbyDetectionContext) on DeviceId
+| extend IsNearbyContext = isnotnull(ContextTime) and Timestamp between (ContextTime - 30m .. ContextTime + 30m)
+| summarize
+    Timestamp = min(Timestamp),
+    DeviceName = any(DeviceName),
+    ReportId = any(ReportId),
+    ProcessCommandLine = any(ProcessCommandLine),
+    AccountName = any(AccountName),
+    AccountSid = any(AccountSid),
+    ParentFileName = any(InitiatingProcessFileName),
+    ParentCommandLine = any(InitiatingProcessCommandLine),
+    ToolingModes = make_set(ToolingMode, 5),
+    NearbyContextTypes = make_set_if(ContextType, IsNearbyContext, 5),
+    NearbyContextEvidence = make_set_if(ContextEvidence, IsNearbyContext, 5)
+  by DeviceId, ProcessName = FileName, ProcessPath
+| project
+    Timestamp,
+    DeviceId,
+    DeviceName,
+    ReportId,
+    Stage = "Stage1_ObservedToolingExecution",
+    StageDescription = "Observed intrusion-tool filename executed from a suspicious user-writable path",
+    ProcessName = FileName,
+    ProcessPath,
+    ProcessCommandLine,
+    AccountName,
+    AccountSid,
+    Evidence = ProcessPath,
+    AdditionalContext = strcat(
+        "Parent=", ParentFileName,
+        " | ParentCommandLine=", ParentCommandLine,
+        " | ToolingModes=", tostring(ToolingModes),
+        " | NearbyContextTypes=", tostring(NearbyContextTypes),
+        " | NearbyContextEvidence=", tostring(NearbyContextEvidence),
+        " | Note=Filename-only matches are renameable and require analyst validation"
+    )
+| order by Timestamp desc

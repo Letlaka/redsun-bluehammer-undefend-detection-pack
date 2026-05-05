@@ -1,0 +1,97 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+// DetectionMetadata:
+//   Family: CrossFamily
+//   QueryType: Hunting
+//   Severity: High
+//   Confidence: High
+//   DataSources: DeviceFileEvents, DeviceNetworkEvents, DeviceProcessEvents
+//   ATTACK: T1033,T1036,T1087,T1090,T1572
+//   SourceRefs: SOURCES.md#crossfamily
+//   ProductionReady: No
+//   LastVerified: 2026-05-05
+
+// Purpose:
+//   Standalone CrossFamily Stage 2 hunt from 01_crossfamily_full_attack_chain.kql.
+//   Finds BeigeBurrow follow-on tunnel activity using command-line, domain, or hash evidence.
+
+let Lookback = 4h;
+let BeigeBurrowSha256 = "a2b6c7a9c4490df70de3cdbfa5fc801a3e1cf6a872749259487e354de2876b7c";
+let BeigeBurrowDomain = "staybud.dpdns.org";
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+union
+    (
+        DeviceProcessEvents
+        | where Timestamp >= ago(Lookback)
+        | where FileName =~ "agent.exe"
+        | extend CommandLineLower = tolower(ProcessCommandLine)
+        | where CommandLineLower contains BeigeBurrowDomain
+            or (CommandLineLower contains "-server" and CommandLineLower contains "-hide")
+        | extend MatchType = case(
+            CommandLineLower contains "-server staybud.dpdns.org:443 -hide", "ExactCommandLine",
+            CommandLineLower contains BeigeBurrowDomain, "DomainInCommandLine",
+            "LooseAgentServerHide"
+        )
+        | project
+            Timestamp,
+            DeviceId,
+            DeviceName,
+            ReportId,
+            Stage = "Stage2_BeigeBurrowTunnelActivity",
+            StageDescription = "BeigeBurrow follow-on tunnel activity observed",
+            ProcessName = FileName,
+            ProcessPath = NormalizePath(FolderPath, FileName),
+            ProcessCommandLine,
+            AccountName,
+            AccountSid,
+            Evidence = ProcessCommandLine,
+            AdditionalContext = strcat("EvidenceType=", MatchType, " | Parent=", InitiatingProcessFileName, " | ParentCommandLine=", InitiatingProcessCommandLine)
+    ),
+    (
+        DeviceNetworkEvents
+        | where Timestamp >= ago(Lookback)
+        | where RemoteUrl contains BeigeBurrowDomain
+            or InitiatingProcessCommandLine contains BeigeBurrowDomain
+        | project
+            Timestamp,
+            DeviceId,
+            DeviceName,
+            ReportId,
+            Stage = "Stage2_BeigeBurrowTunnelActivity",
+            StageDescription = "BeigeBurrow follow-on tunnel activity observed",
+            ProcessName = InitiatingProcessFileName,
+            ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+            ProcessCommandLine = InitiatingProcessCommandLine,
+            AccountName = InitiatingProcessAccountName,
+            AccountSid = InitiatingProcessAccountSid,
+            Evidence = iff(isnotempty(RemoteUrl), RemoteUrl, RemoteIP),
+            AdditionalContext = strcat("EvidenceType=NetworkDomain | RemoteIP=", RemoteIP, " | RemotePort=", tostring(RemotePort), " | RemoteUrl=", RemoteUrl)
+    ),
+    (
+        DeviceFileEvents
+        | where Timestamp >= ago(Lookback)
+        | where tolower(SHA256) == BeigeBurrowSha256
+        | project
+            Timestamp,
+            DeviceId,
+            DeviceName,
+            ReportId,
+            Stage = "Stage2_BeigeBurrowTunnelActivity",
+            StageDescription = "BeigeBurrow follow-on tunnel activity observed",
+            ProcessName = InitiatingProcessFileName,
+            ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+            ProcessCommandLine = InitiatingProcessCommandLine,
+            AccountName = InitiatingProcessAccountName,
+            AccountSid = InitiatingProcessAccountSid,
+            Evidence = NormalizePath(FolderPath, FileName),
+            AdditionalContext = strcat("EvidenceType=SHA256 | SHA256=", SHA256, " | FilePath=", NormalizePath(FolderPath, FileName))
+    )
+| order by Timestamp desc

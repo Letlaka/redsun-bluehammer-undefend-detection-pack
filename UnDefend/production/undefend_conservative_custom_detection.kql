@@ -1,0 +1,532 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Letlaka
+// AI-generated detection content. Review, test, tune, and verify before production use.
+// DetectionMetadata:
+//   Family: UnDefend
+//   QueryType: Production
+//   Severity: High
+//   Confidence: High
+//   DataSources: DeviceEvents, DeviceFileEvents, DeviceProcessEvents, DeviceRegistryEvents
+//   ATTACK: T1562.001,T1012,T1007,T1083
+//   SourceRefs: SOURCES.md#undefend
+//   ProductionReady: Yes
+//   LastVerified: 2026-05-05
+
+// Purpose:
+//   Conservative scheduled-detection candidate derived from the UnDefend
+//   hunting query. This variant keeps only the stronger production-worthy
+//   combinations documented in the upgrade plan and adds observed tooling
+//   context for `undef.exe` and `z.exe`.
+//
+// Notes:
+//   Defender XDR does not consistently expose raw exclusive file-lock telemetry.
+//   This query detects observable file access, monitoring, and failure outcomes.
+
+let Lookback = 2h;
+let CorrelationWindow = 1h;
+let CorrelationStep = 10m;
+let TrustedDefenderProcesses = dynamic([
+    "MsMpEng.exe", "MpCmdRun.exe", "NisSrv.exe", "SecurityHealthService.exe",
+    "MpDlpCmd.exe", "ConfigSecurityPolicy.exe", "MpSigStub.exe", "MRT.exe",
+    "TiWorker.exe", "TrustedInstaller.exe", "svchost.exe", "wuauclt.exe",
+    "UsoClient.exe", "MoUsoCoreWorker.exe"
+]);
+let TrustedServiceQueryProcesses = dynamic([
+    "services.exe", "svchost.exe", "MsMpEng.exe", "SecurityHealthService.exe",
+    "MpCmdRun.exe", "msconfig.exe", "sc.exe", "powershell.exe", "pwsh.exe",
+    "taskmgr.exe", "mmc.exe", "WmiPrvSE.exe"
+]);
+let NormalizePath = (FolderPath:string, FileName:string) {
+    case(
+        isempty(FolderPath), FileName,
+        isempty(FileName), FolderPath,
+        tolower(FolderPath) endswith strcat(@"\", tolower(FileName)), FolderPath,
+        strcat(FolderPath, iff(FolderPath endswith @"\", "", @"\"), FileName)
+    )
+};
+let IsTrustedDefenderPath = (Path:string) {
+    tolower(Path) startswith @"c:\programdata\microsoft\windows defender\"
+    or tolower(Path) startswith @"c:\program files\windows defender\"
+    or tolower(Path) startswith @"c:\program files\microsoft defender\"
+    or tolower(Path) startswith @"c:\program files\windows defender advanced threat protection\"
+};
+let IsDefenderDefinitionPath = (Path:string) {
+    tolower(Path) contains @"\programdata\microsoft\windows defender\definition updates"
+    or tolower(Path) contains @"\windows defender\definition updates"
+};
+let IsMrtPath = (Path:string) {
+    tolower(Path) startswith @"c:\windows\system32\mrt"
+};
+let IsUserWritablePath = (Path:string) {
+    tolower(Path) contains @"\users\"
+    or tolower(Path) contains @"\appdata\local\temp\"
+    or tolower(Path) contains @"\windows\temp\"
+    or tolower(Path) startswith @"c:\temp\"
+};
+let SignatureFiles = dynamic([
+    "mpavbase.vdm", "mpavbase.lkg", "mpasbase.vdm", "mpasbase.lkg",
+    "mpavdlta.vdm", "mpasdlta.vdm"
+]);
+let Stage9_ObservedUnDefendTooling =
+    DeviceProcessEvents
+    | where Timestamp >= ago(Lookback)
+    | where FileName in~ ("undef.exe", "z.exe")
+    | extend ToolPath = NormalizePath(FolderPath, FileName)
+    | where IsUserWritablePath(ToolPath)
+    | extend ToolingMode = case(
+        tolower(ProcessCommandLine) contains "undef.exe -aggressive", "AggressiveMode",
+        tolower(ProcessCommandLine) contains "undef.exe -agressive", "AggressiveModeTypo",
+        FileName =~ "undef.exe", "ObservedUndefendTool",
+        "ObservedCompanionBinary"
+    )
+    | project
+        Timestamp,
+        DeviceId,
+        DeviceName,
+        ReportId,
+        Stage = "Stage9_ObservedUnDefendTooling",
+        StageDescription = "Observed UnDefend tooling executed from a suspicious user-writable path",
+        ProcessName = FileName,
+        ProcessPath = ToolPath,
+        ProcessCommandLine,
+        AccountName,
+        AccountSid,
+        Evidence = ToolPath,
+        AdditionalContext = strcat("ToolingMode=", ToolingMode, " | Parent=", InitiatingProcessFileName, " | ParentCommandLine=", InitiatingProcessCommandLine);
+let Stage8_DefenderHealthAndSignatureStaleness =
+    (
+        let SuspiciousAccessForHealth =
+            DeviceFileEvents
+            | where Timestamp >= ago(Lookback)
+            | where ActionType in~ ("FileAccessed", "FileRead", "FileOpened", "FileModified")
+            | where FileName in~ (SignatureFiles)
+            | where IsDefenderDefinitionPath(FolderPath)
+            | where InitiatingProcessFileName !in~ (TrustedDefenderProcesses)
+            | where not(IsTrustedDefenderPath(InitiatingProcessFolderPath))
+            | project
+                DeviceId,
+                DeviceName,
+                SuspiciousAccessTime = Timestamp,
+                SuspiciousProcess = InitiatingProcessFileName,
+                SuspiciousProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                SuspiciousProcessCommandLine = InitiatingProcessCommandLine,
+                SuspiciousAccountName = InitiatingProcessAccountName,
+                SuspiciousAccountSid = InitiatingProcessAccountSid,
+                SuspiciousEvidence = NormalizePath(FolderPath, FileName),
+                SuspiciousReportId = ReportId;
+        let FailureSignalsForHealth =
+            DeviceEvents
+            | where Timestamp >= ago(Lookback)
+            | extend AdditionalFieldsText = tostring(AdditionalFields)
+            | extend
+                HasEventId2001 = AdditionalFieldsText contains "EventID=2001"
+                    or AdditionalFieldsText contains "EventId=2001"
+                    or AdditionalFieldsText contains @"""EventID"":2001"
+                    or AdditionalFieldsText contains @"""EventId"":2001"
+                    or AdditionalFieldsText contains "Event ID 2001",
+                HasDefenderUpdateContext = AdditionalFieldsText has_any (
+                    "WinDefend",
+                    "Windows Defender",
+                    "Microsoft Defender",
+                    "MsMpEng",
+                    "SignatureUpdate",
+                    "Definition Updates",
+                    "Antivirus",
+                    "Engine",
+                    "Security intelligence",
+                    "PlatformVersion",
+                    "SignatureVersion"
+                )
+                or ActionType contains "Antivirus"
+                or ActionType contains "Defender"
+            | where ActionType in~ ("AntivirusDefinitionUpdateFailed", "AntivirusError", "AntivirusSignatureUpdateFailed")
+                or ActionType contains "UpdateFailed"
+                or ActionType contains "AntivirusError"
+                or AdditionalFieldsText contains "EngineUnavailable"
+                or AdditionalFieldsText contains "UpdateError"
+                or AdditionalFieldsText contains "SignatureUpdate"
+                or AdditionalFieldsText contains "Definition Updates"
+                or (HasEventId2001 and HasDefenderUpdateContext)
+            | where tolower(AdditionalFieldsText) has_any ("fail", "error", "unavailable", "stopped", "stale")
+                or ActionType contains "Failed"
+                or ActionType contains "Error"
+                or HasEventId2001
+            | project
+                DeviceId,
+                FailureTime = Timestamp,
+                FailureActionType = ActionType,
+                FailureDetails = AdditionalFieldsText,
+                FailureReportId = ReportId;
+        let VersionSignalsForHealth =
+            DeviceEvents
+            | where Timestamp >= ago(Lookback)
+            | extend AdditionalFieldsText = tostring(AdditionalFields)
+            | where AdditionalFieldsText has_any ("PlatformVersion", "SignatureVersion", "Security intelligence", "EngineVersion")
+            | summarize VersionSignals = make_set(AdditionalFieldsText, 10) by DeviceId;
+        SuspiciousAccessForHealth
+        | join kind=inner (FailureSignalsForHealth) on DeviceId
+        | where FailureTime between (SuspiciousAccessTime .. SuspiciousAccessTime + CorrelationWindow)
+        | summarize
+            Timestamp = min(SuspiciousAccessTime),
+            DeviceName = any(DeviceName),
+            ReportId = any(SuspiciousReportId),
+            ProcessName = any(SuspiciousProcess),
+            ProcessPath = any(SuspiciousProcessPath),
+            ProcessCommandLine = any(SuspiciousProcessCommandLine),
+            AccountName = any(SuspiciousAccountName),
+            AccountSid = any(SuspiciousAccountSid),
+            FirstSuspiciousAccess = min(SuspiciousAccessTime),
+            FirstFailure = min(FailureTime),
+            SuspiciousProcesses = make_set(SuspiciousProcess, 20),
+            FailureActions = make_set(FailureActionType, 20),
+            SuspiciousEvidence = make_set(SuspiciousEvidence, 20),
+            FailureDetails = make_set(FailureDetails, 20),
+            ReportRefs = make_set(strcat(tostring(SuspiciousAccessTime), ":", tostring(SuspiciousReportId)), 20),
+            FailureReportRefs = make_set(strcat(tostring(FailureTime), ":", tostring(FailureReportId)), 20)
+          by DeviceId, Bucket = bin(SuspiciousAccessTime, CorrelationStep)
+        | join kind=leftouter (VersionSignalsForHealth) on DeviceId
+        | project
+            Timestamp,
+            DeviceId,
+            DeviceName,
+            ReportId,
+            Stage = "Stage8_DefenderHealthAndSignatureStaleness",
+            StageDescription = "Suspicious Defender signature-file access followed by update, engine, or service-health degradation",
+            ProcessName,
+            ProcessPath,
+            ProcessCommandLine,
+            AccountName,
+            AccountSid,
+            Evidence = strcat("FirstSuspiciousAccess=", tostring(FirstSuspiciousAccess), " | FirstFailure=", tostring(FirstFailure)),
+            AdditionalContext = strcat(
+                "SuspiciousProcesses=", tostring(SuspiciousProcesses),
+                " | FailureActions=", tostring(FailureActions),
+                " | SuspiciousEvidence=", tostring(SuspiciousEvidence),
+                " | FailureDetails=", tostring(FailureDetails),
+                " | VersionSignals=", tostring(VersionSignals)
+            )
+    );
+let AllStages =
+    materialize(
+        union
+            (
+                DeviceRegistryEvents
+                | where Timestamp >= ago(Lookback)
+                | where ActionType in~ ("RegistryValueQueried", "RegistryKeyAccessed", "RegistryKeyQueried")
+                | where RegistryKey contains @"\Microsoft\Windows Defender"
+                | where RegistryValueName in~ ("ProductAppDataPath", "SignatureLocation")
+                | where InitiatingProcessFileName !in~ (TrustedDefenderProcesses)
+                | where not(IsTrustedDefenderPath(InitiatingProcessFolderPath))
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage1_DefenderRegistryRecon",
+                    StageDescription = "Defender ProductAppDataPath or SignatureLocation registry value read by a non-Defender process",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = strcat(RegistryKey, "\\", RegistryValueName),
+                    AdditionalContext = strcat("RegistryKey=", RegistryKey, " | RegistryValueName=", RegistryValueName, " | RegistryValueData=", RegistryValueData)
+            ),
+            (
+                DeviceFileEvents
+                | where Timestamp >= ago(Lookback)
+                | where ActionType in~ ("FileAccessed", "FileRead", "FileOpened", "FileModified")
+                | where FileName in~ (SignatureFiles)
+                | where IsDefenderDefinitionPath(FolderPath)
+                | where InitiatingProcessFileName !in~ (TrustedDefenderProcesses)
+                | where not(IsTrustedDefenderPath(InitiatingProcessFolderPath))
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage2_SignatureFileAccess",
+                    StageDescription = "Defender signature or definition file accessed by a non-Defender process",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = NormalizePath(FolderPath, FileName),
+                    AdditionalContext = strcat("ActionType=", ActionType, " | Path=", NormalizePath(FolderPath, FileName))
+            ),
+            (
+                DeviceFileEvents
+                | where Timestamp >= ago(Lookback)
+                | where ActionType in~ ("FileAccessed", "FileRead", "FileOpened", "DirectoryRead")
+                | where IsDefenderDefinitionPath(FolderPath)
+                | where InitiatingProcessFileName !in~ (TrustedDefenderProcesses)
+                | where not(IsTrustedDefenderPath(InitiatingProcessFolderPath))
+                | summarize
+                    Timestamp = min(Timestamp),
+                    LastSeen = max(Timestamp),
+                    AccessCount = count(),
+                    DeviceName = any(DeviceName),
+                    ReportId = any(ReportId),
+                    FileNames = make_set(FileName, 20),
+                    FolderPaths = make_set(FolderPath, 10),
+                    ProcessCommandLine = any(InitiatingProcessCommandLine),
+                    AccountName = any(InitiatingProcessAccountName),
+                    AccountSid = any(InitiatingProcessAccountSid)
+                  by DeviceId, ProcessName = InitiatingProcessFileName, ProcessPath = InitiatingProcessFolderPath, ProcessId = InitiatingProcessId, Bucket = bin(Timestamp, 5m)
+                | where AccessCount >= 3
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage3_DefenderUpdateDirectoryMonitoring",
+                    StageDescription = "Repeated Defender definition update directory access by a non-Defender process",
+                    ProcessName,
+                    ProcessPath = NormalizePath(ProcessPath, ProcessName),
+                    ProcessCommandLine,
+                    AccountName,
+                    AccountSid,
+                    Evidence = strcat("AccessCount=", tostring(AccessCount)),
+                    AdditionalContext = strcat("LastSeen=", tostring(LastSeen), " | FileNames=", tostring(FileNames), " | FolderPaths=", tostring(FolderPaths))
+            ),
+            (
+                DeviceEvents
+                | where Timestamp >= ago(Lookback)
+                | extend AdditionalFieldsText = tostring(AdditionalFields)
+                | where AdditionalFieldsText contains "WinDefend"
+                    or AdditionalFieldsText contains "Windows Defender"
+                | where ActionType in~ ("OpenServiceHandle", "ServiceQuery", "ServiceControlManager")
+                    or ActionType contains "Service"
+                    or AdditionalFieldsText contains "QueryService"
+                    or AdditionalFieldsText contains "NotifyServiceStatusChange"
+                    or AdditionalFieldsText contains "OpenService"
+                | where InitiatingProcessFileName !in~ (TrustedServiceQueryProcesses)
+                | where isempty(InitiatingProcessAccountSid) or InitiatingProcessAccountSid != "S-1-5-18"
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage4_WinDefendServiceMonitoring",
+                    StageDescription = "WinDefend service status or configuration queried by a non-standard process",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = ActionType,
+                    AdditionalContext = AdditionalFieldsText
+            ),
+            (
+                DeviceEvents
+                | where Timestamp >= ago(Lookback)
+                | extend AdditionalFieldsText = tostring(AdditionalFields)
+                | where ActionType in~ ("ServiceStopped", "ServiceDisabled", "ServiceConfigurationChanged")
+                    or (ActionType contains "Service" and AdditionalFieldsText has_any ("stopped", "disabled", "stop"))
+                | where AdditionalFieldsText contains "WinDefend"
+                    or AdditionalFieldsText contains "MsMpEng"
+                    or AdditionalFieldsText contains "Windows Defender"
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage5_WinDefendServiceStopped",
+                    StageDescription = "WinDefend service stopped, disabled, or reconfigured",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = ActionType,
+                    AdditionalContext = AdditionalFieldsText
+            ),
+            (
+                DeviceEvents
+                | where Timestamp >= ago(Lookback)
+                | extend AdditionalFieldsText = tostring(AdditionalFields)
+                | extend
+                    HasEventId2001 = AdditionalFieldsText contains "EventID=2001"
+                        or AdditionalFieldsText contains "EventId=2001"
+                        or AdditionalFieldsText contains @"""EventID"":2001"
+                        or AdditionalFieldsText contains @"""EventId"":2001"
+                        or AdditionalFieldsText contains "Event ID 2001",
+                    HasDefenderUpdateContext = AdditionalFieldsText has_any (
+                        "WinDefend",
+                        "Windows Defender",
+                        "Microsoft Defender",
+                        "MsMpEng",
+                        "SignatureUpdate",
+                        "Definition Updates",
+                        "Antivirus",
+                        "Engine",
+                        "Security intelligence"
+                    )
+                    or ActionType contains "Antivirus"
+                    or ActionType contains "Defender"
+                | where ActionType in~ ("AntivirusDefinitionUpdateFailed", "AntivirusError", "AntivirusSignatureUpdateFailed")
+                    or ActionType contains "UpdateFailed"
+                    or ActionType contains "AntivirusError"
+                    or AdditionalFieldsText contains "EngineUnavailable"
+                    or AdditionalFieldsText contains "UpdateError"
+                    or AdditionalFieldsText contains "SignatureUpdate"
+                    or AdditionalFieldsText contains "Definition Updates"
+                    or (HasEventId2001 and HasDefenderUpdateContext)
+                | where tolower(AdditionalFieldsText) has_any ("fail", "error", "unavailable", "stopped")
+                    or ActionType contains "Failed"
+                    or ActionType contains "Error"
+                    or HasEventId2001
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage6_DefenderUpdateOrEngineFailure",
+                    StageDescription = "Defender update, signature, service, or engine failure telemetry observed",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = ActionType,
+                    AdditionalContext = AdditionalFieldsText
+            ),
+            (
+                DeviceFileEvents
+                | where Timestamp >= ago(Lookback)
+                | where IsMrtPath(FolderPath)
+                | where InitiatingProcessFileName !in~ (TrustedDefenderProcesses)
+                | where isempty(InitiatingProcessAccountSid) or InitiatingProcessAccountSid != "S-1-5-18"
+                | project
+                    Timestamp,
+                    DeviceId,
+                    DeviceName,
+                    ReportId,
+                    Stage = "Stage7_MrtDirectoryAccess",
+                    StageDescription = "MRT update directory accessed by a non-system, non-MRT process",
+                    ProcessName = InitiatingProcessFileName,
+                    ProcessPath = NormalizePath(InitiatingProcessFolderPath, InitiatingProcessFileName),
+                    ProcessCommandLine = InitiatingProcessCommandLine,
+                    AccountName = InitiatingProcessAccountName,
+                    AccountSid = InitiatingProcessAccountSid,
+                    Evidence = NormalizePath(FolderPath, FileName),
+                    AdditionalContext = strcat("ActionType=", ActionType, " | Path=", NormalizePath(FolderPath, FileName))
+            ),
+            (
+                Stage8_DefenderHealthAndSignatureStaleness
+            ),
+            (
+                Stage9_ObservedUnDefendTooling
+            )
+        | where isnotempty(DeviceId) and isnotempty(Timestamp)
+        | extend StageTime = Timestamp
+    );
+AllStages
+| extend WindowStart = bin(StageTime, CorrelationStep)
+| union (
+    AllStages
+    | extend WindowStart = bin(StageTime, CorrelationStep) - 10m
+)
+| union (
+    AllStages
+    | extend WindowStart = bin(StageTime, CorrelationStep) - 20m
+)
+| union (
+    AllStages
+    | extend WindowStart = bin(StageTime, CorrelationStep) - 30m
+)
+| union (
+    AllStages
+    | extend WindowStart = bin(StageTime, CorrelationStep) - 40m
+)
+| union (
+    AllStages
+    | extend WindowStart = bin(StageTime, CorrelationStep) - 50m
+)
+| union (
+    AllStages
+    | extend WindowStart = bin(StageTime, CorrelationStep) - CorrelationWindow
+)
+| summarize hint.strategy = shuffle
+    Stages = make_set(Stage, 12),
+    StageDetails = make_set(strcat(Stage, ": ", StageDescription), 16),
+    StageCount = dcount(Stage),
+    EventCount = count(),
+    FirstSeen = min(StageTime),
+    LastSeen = max(StageTime),
+    Processes = make_set(ProcessName, 20),
+    ProcessCommandLines = make_set(ProcessCommandLine, 20),
+    Accounts = make_set(AccountName, 20),
+    AccountSids = make_set(AccountSid, 20),
+    Evidence = make_set(Evidence, 20),
+    AdditionalContexts = make_set(AdditionalContext, 20),
+    ReportRefs = make_set(strcat(tostring(StageTime), ":", tostring(ReportId)), 40),
+    AggressiveObservedToolingCount = countif(
+        Stage == "Stage9_ObservedUnDefendTooling"
+            and (AdditionalContext contains "ToolingMode=AggressiveMode" or AdditionalContext contains "ToolingMode=AggressiveModeTypo")
+    )
+  by DeviceId, DeviceName, WindowStart
+| where LastSeen between (WindowStart .. WindowStart + CorrelationWindow + CorrelationStep)
+| where StageCount >= 2
+| extend
+    HasRegistryRecon = set_has_element(Stages, "Stage1_DefenderRegistryRecon"),
+    HasSignatureFileAccess = set_has_element(Stages, "Stage2_SignatureFileAccess"),
+    HasDirectoryMonitoring = set_has_element(Stages, "Stage3_DefenderUpdateDirectoryMonitoring"),
+    HasServiceMonitoring = set_has_element(Stages, "Stage4_WinDefendServiceMonitoring"),
+    HasServiceStopped = set_has_element(Stages, "Stage5_WinDefendServiceStopped"),
+    HasUpdateFailure = set_has_element(Stages, "Stage6_DefenderUpdateOrEngineFailure"),
+    HasMrtAccess = set_has_element(Stages, "Stage7_MrtDirectoryAccess"),
+    HasHealthAndStaleness = set_has_element(Stages, "Stage8_DefenderHealthAndSignatureStaleness"),
+    HasObservedTooling = set_has_element(Stages, "Stage9_ObservedUnDefendTooling"),
+    HasAggressiveObservedTooling = AggressiveObservedToolingCount > 0
+| extend
+    HasUnDefendAnchor = HasRegistryRecon
+        or HasSignatureFileAccess
+        or HasDirectoryMonitoring
+        or HasServiceMonitoring
+        or HasMrtAccess
+        or HasHealthAndStaleness
+| where HasUnDefendAnchor
+| where (HasObservedTooling and (HasUpdateFailure or HasServiceStopped))
+    or (HasSignatureFileAccess and HasUpdateFailure)
+    or (HasDirectoryMonitoring and HasServiceStopped)
+    or (StageCount >= 3 and (HasSignatureFileAccess or HasDirectoryMonitoring or HasServiceMonitoring or HasHealthAndStaleness))
+| extend
+    AlertSeverity = case(
+        HasAggressiveObservedTooling and (HasUpdateFailure or HasServiceStopped), "Critical",
+        HasObservedTooling and (HasUpdateFailure or HasServiceStopped), "Critical",
+        HasHealthAndStaleness and (HasSignatureFileAccess or HasUpdateFailure or HasServiceStopped), "Critical",
+        HasSignatureFileAccess and HasUpdateFailure, "High",
+        HasSignatureFileAccess and HasServiceStopped, "High",
+        HasHealthAndStaleness, "High",
+        HasDirectoryMonitoring and (HasUpdateFailure or HasServiceStopped), "High",
+        StageCount >= 3 and (HasSignatureFileAccess or HasDirectoryMonitoring or HasServiceMonitoring or HasHealthAndStaleness), "High",
+        "Informational"
+    ),
+    TTP = "T1083,T1490,T1562.001,T1112,T1007",
+    DetectionReason = "Conservative UnDefend production candidate: observed tooling or strong Defender file, directory, and service-health degradation correlation within 60 minutes",
+    RecommendedAction = "Validate Defender update history, signature freshness, WinDefend state, and any suspicious `undef.exe` or `z.exe` execution from user-writable paths before escalating.",
+    SourceRefs = "SOURCES.md#undefend"
+| project-reorder
+    AlertSeverity,
+    DetectionReason,
+    RecommendedAction,
+    SourceRefs,
+    FirstSeen,
+    LastSeen,
+    DeviceName,
+    DeviceId,
+    StageCount,
+    EventCount,
+    Stages,
+    StageDetails,
+    Processes,
+    ProcessCommandLines,
+    Accounts,
+    AccountSids,
+    Evidence,
+    TTP,
+    ReportRefs,
+    AdditionalContexts
+| order by StageCount desc, FirstSeen asc

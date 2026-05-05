@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Letlaka
 // AI-generated detection content. Review, test, tune, and verify before production use.
+// DetectionMetadata:
+//   Family: RedSun
+//   QueryType: Hunting
+//   Severity: Medium
+//   Confidence: Medium
+//   DataSources: DeviceProcessEvents
+//   ATTACK: T1068,T1574.010,T1543.003
+//   SourceRefs: SOURCES.md#redsun
+//   ProductionReady: No
+//   LastVerified: 2026-05-05
 
 // Purpose:
 //   Standalone RedSun Stage 5 hunt from 01_redsun_full_attack_chain.kql.
