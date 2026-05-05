@@ -9,6 +9,6 @@
 | RedSun | Reparse or junction pivot | T1574.010 | File-path redirection behavior is central to the chain. |
 | RedSun | Process injection indicators | T1055 | SYSTEM-level `conhost.exe` and related execution artifacts may indicate injected or hollowed execution and raise severity. |
 | UnDefend | Defender degradation | T1562.001 | Security tooling availability is impaired through file, update, and service-health interference. |
-| UnDefend | Configuration discovery and registry access | T1112 | Defender registry and service-state discovery are part of the observed behavior. |
+| UnDefend | Configuration discovery and registry access | T1012 | Defender registry and service-state discovery are part of the observed behavior. |
 | CrossFamily | BeigeBurrow tunneling | T1572,T1090 | Reverse-tunnel or proxy-like follow-on access materially raises severity. |
 | CrossFamily | Recon commands | T1033,T1087 | Privilege and account-group discovery near suspicious tooling strengthens confidence. |
