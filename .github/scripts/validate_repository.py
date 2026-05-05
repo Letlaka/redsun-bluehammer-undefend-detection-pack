@@ -369,13 +369,24 @@ def validate_forbidden_fixed_version(errors: list[str]) -> None:
 
 
 def validate_ioc_sources(errors: list[str]) -> None:
-    sources_text = (ROOT / "SOURCES.md").read_text(encoding="utf-8")
-    iocs_text = (ROOT / "IOCS.md").read_text(encoding="utf-8")
+    sources_path = ROOT / "SOURCES.md"
+    iocs_path = ROOT / "IOCS.md"
+
+    if not sources_path.is_file() or not iocs_path.is_file():
+        return
+
+    try:
+        sources_text = sources_path.read_text(encoding="utf-8")
+        iocs_text = iocs_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        add_error(errors, sources_path, f"unable to read IOC support files: {exc}")
+        return
+
     reference_text = "\n".join((sources_text, iocs_text))
 
     for ioc in sorted(IOC_STRINGS):
         if ioc not in reference_text:
-            add_error(errors, ROOT / "SOURCES.md", f"IOC `{ioc}` is missing from SOURCES.md and IOCS.md")
+            add_error(errors, sources_path, f"IOC `{ioc}` is missing from SOURCES.md and IOCS.md")
 
     for kql_path in ROOT.rglob("*.kql"):
         text = kql_path.read_text(encoding="utf-8")
