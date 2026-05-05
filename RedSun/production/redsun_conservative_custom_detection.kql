@@ -395,7 +395,7 @@ AllStages
                     "High",
                     "Informational"
                 ),
-    TTP = "T1068,T1574.010,T1543.003,T1543.003",
+    TTP = "T1068,T1574.010,T1543.003",
     DetectionReason = "Conservative RedSun production candidate: Microsoft detection-name telemetry or strong Storage Tiers, System32 write, SYSTEM execution, or Cloud Files pivot evidence within 60 minutes",
     RecommendedAction = "Validate Storage Tiers COM activity, confirm whether System32 writes or SYSTEM process creation were legitimate, and review any Cloud Files mitigation exceptions before escalating.",
     SourceRefs = "SOURCES.md#redsun"
